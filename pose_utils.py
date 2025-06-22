@@ -1,5 +1,5 @@
+from mediapipe_init import mp
 import cv2
-import mediapipe as mp
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,7 +7,6 @@ from torch.nn.utils.rnn import pack_padded_sequence
 
 mp_holistic = mp.solutions.holistic
 
-# מיפוי שמות איברים לאינדקסים במערך הזוויות של extract_angles
 ANGLE_PARTS_MAP = {
     "right_leg": [2, 8, 10, 12, 14],
     "left_leg": [3, 9, 11, 13, 15],
@@ -32,21 +31,24 @@ def get_angle_indices_by_parts(focus_parts):
     return sorted(indices)
 
 class LSTMClassifier(nn.Module):
-    def __init__(self, input_size=40, hidden_size=128, num_layers=2, num_classes=2, dropout=0.5):
+    def __init__(self, input_size=40, hidden_size=256, num_layers=3, num_classes=2, dropout=0.5, bidirectional=True):
         super(LSTMClassifier, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.bidirectional = bidirectional
         self.batch_norm = nn.BatchNorm1d(input_size)
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout
+            dropout=dropout,
+            bidirectional=bidirectional
         )
+        lstm_out = hidden_size * 2 if bidirectional else hidden_size
         self.fc = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(hidden_size, num_classes)
+            nn.Linear(lstm_out, num_classes)
         )
 
     def forward(self, x, lengths):
@@ -55,9 +57,67 @@ class LSTMClassifier(nn.Module):
         x = x.transpose(1, 2)
         packed_x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_out, (h_n, _) = self.lstm(packed_x)
-        out = h_n[-1]
+        if self.bidirectional:
+            out = torch.cat((h_n[-2], h_n[-1]), dim=1)
+        else:
+            out = h_n[-1]
         out = self.fc(out)
         return out
+
+class CNN_LSTM_Classifier(nn.Module):
+    def __init__(self, input_size=40, cnn_out=64, kernel_size=3, hidden_size=128, num_layers=2, num_classes=2, dropout=0.5, bidirectional=True):
+        super(CNN_LSTM_Classifier, self).__init__()
+        self.batch_norm = nn.BatchNorm1d(input_size)
+        self.cnn = nn.Conv1d(in_channels=input_size, out_channels=cnn_out, kernel_size=kernel_size, padding=1)
+        self.lstm = nn.LSTM(
+            input_size=cnn_out,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+            bidirectional=bidirectional
+        )
+        lstm_out = hidden_size * 2 if bidirectional else hidden_size
+        self.fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(lstm_out, num_classes)
+        )
+        self.bidirectional = bidirectional
+
+    def forward(self, x, lengths):
+        x = x.transpose(1, 2)             # (batch, input_size, seq_len)
+        x = self.batch_norm(x)
+        x = self.cnn(x)                   # (batch, cnn_out, seq_len)
+        x = x.transpose(1, 2)             # (batch, seq_len, cnn_out)
+        packed_x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, (h_n, _) = self.lstm(packed_x)
+        if self.bidirectional:
+            out = torch.cat((h_n[-2], h_n[-1]), dim=1)
+        else:
+            out = h_n[-1]
+        out = self.fc(out)
+        return out
+
+# ---- DATA AUGMENTATION ----
+def augment_angles(sequence, noise_std=2.0, probability=0.5):
+    if np.random.rand() < probability:
+        noise = np.random.normal(0, noise_std, sequence.shape)
+        sequence = sequence + noise
+    return sequence
+
+def speed_up(sequence, factor=2):
+    return sequence[::factor]
+
+def slow_down(sequence, factor=2):
+    return np.repeat(sequence, factor, axis=0)
+
+def apply_all_augmentations(sequence):
+    aug_sequences = [sequence]
+    aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))
+    if len(sequence) > 3:
+        aug_sequences.append(speed_up(sequence, factor=2))
+    aug_sequences.append(slow_down(sequence, factor=2))
+    return aug_sequences
 
 def extract_angles(landmarks):
     angles = []
@@ -75,7 +135,6 @@ def extract_angles(landmarks):
         'left_knee': landmarks.landmark[mp_holistic.PoseLandmark.LEFT_KNEE],
         'left_ankle': landmarks.landmark[mp_holistic.PoseLandmark.LEFT_ANKLE]
     }
-
     def calculate_angle(a, b, c):
         a = np.array([a.x, a.y, a.z])
         b = np.array([b.x, b.y, b.z])
@@ -85,8 +144,6 @@ def extract_angles(landmarks):
         if angle > 180.0:
             angle = 360 - angle
         return angle
-
-    # 40 זוויות — לא השתנה
     angles.append(calculate_angle(points['right_shoulder'], points['right_elbow'], points['right_wrist']))
     angles.append(calculate_angle(points['left_shoulder'], points['left_elbow'], points['left_wrist']))
     angles.append(calculate_angle(points['right_hip'], points['right_knee'], points['right_ankle']))
@@ -123,7 +180,28 @@ def extract_angles(landmarks):
         angles.append(0.0)
     return angles
 
-def extract_sequence_from_video(video_path, focus_indices=None):
+def extract_keypoints_xyz(landmarks):
+    indices = [
+        mp_holistic.PoseLandmark.RIGHT_SHOULDER,
+        mp_holistic.PoseLandmark.RIGHT_ELBOW,
+        mp_holistic.PoseLandmark.RIGHT_WRIST,
+        mp_holistic.PoseLandmark.RIGHT_HIP,
+        mp_holistic.PoseLandmark.RIGHT_KNEE,
+        mp_holistic.PoseLandmark.RIGHT_ANKLE,
+        mp_holistic.PoseLandmark.LEFT_SHOULDER,
+        mp_holistic.PoseLandmark.LEFT_ELBOW,
+        mp_holistic.PoseLandmark.LEFT_WRIST,
+        mp_holistic.PoseLandmark.LEFT_HIP,
+        mp_holistic.PoseLandmark.LEFT_KNEE,
+        mp_holistic.PoseLandmark.LEFT_ANKLE,
+    ]
+    coords = []
+    for idx in indices:
+        pt = landmarks.landmark[idx]
+        coords.extend([pt.x, pt.y, pt.z])
+    return coords
+
+def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False):
     cap = cv2.VideoCapture(video_path)
     sequence = []
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
@@ -136,8 +214,10 @@ def extract_sequence_from_video(video_path, focus_indices=None):
             results = holistic.process(image)
             if results.pose_landmarks:
                 angles = extract_angles(results.pose_landmarks)
-                if focus_indices is not None:
-                    angles = [angles[i] for i in focus_indices]
-                sequence.append(angles)
+                features = [angles[i] for i in focus_indices] if focus_indices else angles
+                if use_keypoints:
+                    coords = extract_keypoints_xyz(results.pose_landmarks)
+                    features = features + coords
+                sequence.append(features)
     cap.release()
-    return sequence
+    return np.array(sequence)
