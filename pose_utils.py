@@ -111,13 +111,16 @@ def speed_up(sequence, factor=2):
 def slow_down(sequence, factor=2):
     return np.repeat(sequence, factor, axis=0)
 
-def apply_all_augmentations(sequence):
+def apply_all_augmentations(sequence, debug_path=None):
     aug_sequences = [sequence]
     aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))
     if len(sequence) > 3:
         aug_sequences.append(speed_up(sequence, factor=2))
     aug_sequences.append(slow_down(sequence, factor=2))
+    if debug_path:
+        print(f"{debug_path}: generated {len(aug_sequences)} augmented samples (orig len: {len(sequence)})")
     return aug_sequences
+
 
 def extract_angles(landmarks):
     angles = []
@@ -221,3 +224,73 @@ def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=Fa
                 sequence.append(features)
     cap.release()
     return np.array(sequence)
+
+class LSTM_Transformer_Classifier(nn.Module):
+    def __init__(self, input_size=40, hidden_size=256, num_layers=3, num_classes=2, 
+                 dropout=0.5, bidirectional=True, nhead=8, num_transformer_layers=2):
+        super(LSTM_Transformer_Classifier, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.nhead = nhead
+        
+        # Batch normalization for input
+        self.batch_norm = nn.BatchNorm1d(input_size)
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+            bidirectional=bidirectional
+        )
+        
+        # Transformer encoder layer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size * 2 if bidirectional else hidden_size,
+            nhead=nhead,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_transformer_layers)
+        
+        # Output layers
+        lstm_out = hidden_size * 2 if bidirectional else hidden_size
+        self.fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(lstm_out, lstm_out // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(lstm_out // 2, num_classes)
+        )
+
+    def forward(self, x, lengths):
+        # Input preprocessing
+        x = x.transpose(1, 2)
+        x = self.batch_norm(x)
+        x = x.transpose(1, 2)
+        
+        # LSTM processing
+        packed_x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, (h_n, _) = self.lstm(packed_x)
+        
+        # Unpack the sequence for transformer
+        unpacked_out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
+        
+        # Transformer processing (without padding mask for MPS compatibility)
+        transformer_out = self.transformer(unpacked_out)
+        
+        # Global average pooling over sequence dimension
+        # Use lengths to exclude padded positions
+        lengths_device = lengths.to(x.device)
+        mask_expanded = torch.arange(transformer_out.size(1), device=x.device).unsqueeze(0) < lengths_device.unsqueeze(1)
+        mask_expanded = mask_expanded.unsqueeze(-1).expand_as(transformer_out)
+        transformer_out = transformer_out.masked_fill(~mask_expanded, 0)
+        pooled_out = transformer_out.sum(dim=1) / lengths_device.unsqueeze(1).float()
+        
+        # Final classification
+        out = self.fc(pooled_out)
+        return out

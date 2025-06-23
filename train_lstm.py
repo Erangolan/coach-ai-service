@@ -21,7 +21,7 @@ from suppress_logs import suppress_logs
 suppress_logs()
 
 import argparse
-from pose_utils import get_angle_indices_by_parts, LSTMClassifier, CNN_LSTM_Classifier
+from pose_utils import get_angle_indices_by_parts, LSTMClassifier, CNN_LSTM_Classifier, LSTM_Transformer_Classifier
 from exercise_dataset import ExerciseDataset
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -31,6 +31,7 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from collections import Counter
 
 def print_both(message):
     print(message, file=log_file_handle, flush=True)
@@ -90,7 +91,7 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         input_size += 12 * 3  # 12 keypoints * (x,y,z)
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts})")
 
-    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints)
+    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, print_both=print_both)
     n = len(full_dataset)
     indices = list(range(n))
     train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
@@ -115,14 +116,31 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         device = "cpu"
         print_both("Training on CPU")
 
+    # Count class samples for weights
+    labels = [label for _, label, _ in full_dataset.samples]
+    label_counts = Counter(labels)
+    num_good = label_counts.get(1, 0)
+    num_bad = label_counts.get(0, 0)
+    total = num_good + num_bad
+    class_weights = [0, 0]
+    if num_bad > 0 and num_good > 0:
+        class_weights[0] = total / (2 * num_bad)
+        class_weights[1] = total / (2 * num_good)
+    else:
+        class_weights = [1.0, 1.0]
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
+    print_both(f"Class weights: {class_weights}")
+
     # Choose model
     if model_type == 'cnn_lstm':
         model = CNN_LSTM_Classifier(input_size=input_size, num_classes=2, bidirectional=bidirectional)
+    elif model_type == 'lstm_transformer':
+        model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=2, bidirectional=bidirectional)
     else:
         model = LSTMClassifier(input_size=input_size, num_classes=2, bidirectional=bidirectional)
     model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     for epoch in range(num_epochs):
@@ -135,6 +153,9 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
             sequences = sequences.to(device)
             labels = labels.to(device)
             optimizer.zero_grad()
+            # Ensure criterion weights are on the same device as labels
+            if criterion.weight.device != labels.device:
+                criterion.weight = criterion.weight.to(labels.device)
             outputs = model(sequences, lengths)
             loss = criterion(outputs, labels)
             loss.backward()
@@ -173,7 +194,7 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     save_confusion_matrix(model, test_loader, device=device)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train LSTM/CNN-LSTM model for exercise classification')
+    parser = argparse.ArgumentParser(description='Train LSTM/CNN-LSTM/LSTM-Transformer model for exercise classification')
     parser.add_argument('--data_dir', type=str, default='data/exercises', help='Directory containing training videos')
     parser.add_argument('--exercise', type=str, required=True, help='Name of the exercise to train')
     parser.add_argument('--focus', nargs='*', default=[], help='Which body parts to focus on (e.g. right_leg right_knee)')
@@ -183,7 +204,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_keypoints', action='store_true', help='Include xyz keypoints as features')
     parser.add_argument('--augment', action='store_true', help='Apply data augmentation')
     parser.add_argument('--no_bidirectional', action='store_true', help='Disable BiLSTM')
-    parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'cnn_lstm'], help='Which model to use')
+    parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'cnn_lstm', 'lstm_transformer'], help='Which model to use')
     args = parser.parse_args()
     
     try:
