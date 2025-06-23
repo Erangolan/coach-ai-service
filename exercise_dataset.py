@@ -3,7 +3,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-import torch.nn as nn
+import random
 
 class ExerciseDataset(Dataset):
     def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, print_both=None):
@@ -23,7 +23,12 @@ class ExerciseDataset(Dataset):
 
         self.samples = []
         good_aug, bad_aug = 0, 0
+        good_augmented_samples = []
+        bad_augmented_samples = []
 
+        max_aug_per_video = 4  # לא יותר מ-4 אוגמנטציות לכל סרטון
+
+        # אוגמנטציה עדינה ומוגבלת
         for video_path, label in self.all_files:
             sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints)
             if len(sequence) == 0:
@@ -31,14 +36,33 @@ class ExerciseDataset(Dataset):
                     self.print_both(f"EMPTY SEQUENCE: {video_path}")
                 else:
                     print(f"EMPTY SEQUENCE: {video_path}")
+                continue  # דלג על ריק
             aug_sequences = apply_all_augmentations(sequence, debug_path=video_path)
+            aug_sequences = aug_sequences[:max_aug_per_video]  # מגביל כמות
             for aug_seq in aug_sequences:
                 if len(aug_seq) > 0:
                     self.samples.append((aug_seq, label, video_path))
                     if label == 1:
                         good_aug += 1
+                        good_augmented_samples.append((aug_seq, label, video_path))
                     else:
                         bad_aug += 1
+                        bad_augmented_samples.append((aug_seq, label, video_path))
+
+        # איזון oversampling עדין: bad <= good (בלי הגזמה)
+        if bad_aug < good_aug and bad_augmented_samples:
+            needed = good_aug - bad_aug
+            extra_bad_samples = []
+            for _ in range(needed):
+                # בחר אקראית דגימה bad קיימת (ולא צור עוד אוגמנטציות חדשות)
+                aug_seq, label, video_path = random.choice(bad_augmented_samples)
+                self.samples.append((aug_seq, 0, video_path + "_extra_dup"))
+                bad_aug += 1
+                extra_bad_samples.append((aug_seq, 0, video_path + "_extra_dup"))
+            if self.print_both:
+                self.print_both(f"Added {len(extra_bad_samples)} extra duplicated bad samples to balance dataset.")
+            else:
+                print(f"Added {len(extra_bad_samples)} extra duplicated bad samples to balance dataset.")
 
         msg1 = f"\nTotal videos: Good={len(self.good_files)}, Bad={len(self.bad_files)}"
         msg2 = f"Total samples after augmentation: Good={good_aug}, Bad={bad_aug}"
@@ -57,5 +81,4 @@ class ExerciseDataset(Dataset):
 
     def __getitem__(self, idx):
         sequence, label, filename = self.samples[idx]
-        return torch.FloatTensor(sequence), label, filename
-
+        return torch.FloatTensor(sequence.copy()), label, filename

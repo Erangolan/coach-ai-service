@@ -92,10 +92,22 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts})")
 
     full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, print_both=print_both)
-    n = len(full_dataset)
-    indices = list(range(n))
-    train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
-    train_idx, val_idx = train_test_split(train_idx, test_size=0.25, random_state=42) # 0.25 x 0.8 = 0.2
+    # אסוף שמות סרטונים מקוריים
+    video_to_label = {}  # {filename: label}
+    for _, label, filename in full_dataset.samples:
+        orig_file = filename.split('_extra_aug')[0]  # עוזר גם לדגימות מאוגמנטציה
+        video_to_label[orig_file] = label
+
+    all_videos = list(set(video_to_label.keys()))
+    train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42, stratify=[video_to_label[v] for v in all_videos])
+    train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42, stratify=[video_to_label[v] for v in train_videos])
+
+    def split_by_videos(samples, videos):
+        return [i for i, sample in enumerate(samples) if sample[2].split('_extra_aug')[0] in videos]
+
+    train_idx = split_by_videos(full_dataset.samples, train_videos)
+    val_idx = split_by_videos(full_dataset.samples, val_videos)
+    test_idx = split_by_videos(full_dataset.samples, test_videos)
 
     train_set = Subset(full_dataset, train_idx)
     val_set = Subset(full_dataset, val_idx)

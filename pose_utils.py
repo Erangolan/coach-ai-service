@@ -112,14 +112,17 @@ def slow_down(sequence, factor=2):
     return np.repeat(sequence, factor, axis=0)
 
 def apply_all_augmentations(sequence, debug_path=None):
-    aug_sequences = [sequence]
-    aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))
+    aug_sequences = [sequence]  # המקורי
+    aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))  # רעש עדין בלבד
     if len(sequence) > 3:
-        aug_sequences.append(speed_up(sequence, factor=2))
-    aug_sequences.append(slow_down(sequence, factor=2))
+        aug_sequences.append(speed_up(sequence, factor=2))   # האצה פי 2 בלבד
+    aug_sequences.append(slow_down(sequence, factor=2))      # האטה פי 2 בלבד
+    # לא מוסיפים רעש חזק, לא reverse, לא קיצוץ, לא שינוי מהירות אגרסיבי
+    # שמור על גיוון ריאליסטי ולא מוגזם
     if debug_path:
         print(f"{debug_path}: generated {len(aug_sequences)} augmented samples (orig len: {len(sequence)})")
-    return aug_sequences
+    return [seq for seq in aug_sequences if len(seq) > 0]
+
 
 
 def extract_angles(landmarks):
