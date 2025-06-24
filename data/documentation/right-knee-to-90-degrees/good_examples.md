@@ -1,36 +1,37 @@
-# דוגמאות טובות לתרגיל כיפוף ברך ימין ל-90 מעלות
+# Good Examples for Right Knee to 90 Degrees Exercise
 
-## נקודות מפתח לתנועה טובה
-1. יציבה נכונה
-   - עמידה יציבה על שתי הרגליים
-   - משקל הגוף מפולג באופן שווה
-   - גב ישר וניטרלי
-   - כתפיים משוחררות
+## Key Points for Good Movement
+1. Stable posture
+   - Attention to stability on both legs
+   - The back remains straight throughout the movement
+   - Head is straight and neutral
+   - Hands are relaxed
 
-2. תנועה נכונה
-   - כיפוף מבוקר של ברך ימין
-   - שמירה על יציבות ברך שמאל
-   - תנועה חלקה ומבוקרת
-   - חזרה מבוקרת למיקום ההתחלתי
+2. Correct movement
+   - Knee bends to 90 degrees
+   - Focus on knee alignment during the descent
+   - Movement is smooth and controlled
+   - No excessive movement in the supporting leg
 
-3. זוויות מפרקים
-   - ברך ימין: 90 מעלות בדיוק בעומק מקסימלי
-   - ירך ימין: 90 מעלות בעומק מקסימלי
-   - קרסול ימין: 70-90 מעלות בעומק מקסימלי
-   - גב: 0-5 מעלות הטיה קדימה
+3. Main reference angles
+   - Right knee: 90 degrees at the lowest point in the sagittal plane
+   - Left knee: 90 degrees at the lowest point in the sagittal plane
+   - Ankle: 70-90 degrees at the lowest point in the sagittal plane
+   - Head: 0-5 degrees deviation
 
-## טיפים לביצוע נכון
-- שמור על משקל הגוף במרכז כף הרגל
-- החזק את החזה מורם
-- שמור על מתח בשרירי הליבה
-- נשום עמוק לפני הירידה
-- עלה בצורה מבוקרת
-- התמקד בשמירה על זווית מדויקת של 90 מעלות
+## Tips for Proper Execution
+- Focus on keeping the back straight throughout the movement
+- Avoid excessive forward lean
+- Focus on weight distribution on the supporting leg
+- Pay attention to the angle of the knee at 90 degrees
+- Keep the movement controlled
+- Avoid unnecessary movement in the supporting leg
+- There is no excessive movement in the upper body
 
-## סימנים לתנועה טובה
-- תנועה חלקה ומבוקרת
-- שמירה על יציבות לאורך כל התנועה
-- זווית מדויקת של 90 מעלות בברך
-- חזרה למיקום ההתחלתי בצורה מלאה
-- שמירה על יישור נכון של הברך והקרסול
-- אין תנועה מיותרת בגוף העליון 
+## Example Videos for Good Movement
+- Movement is smooth and controlled
+- Focus on knee alignment
+- Angles are measured at 90 degrees in the sagittal plane
+- No excessive movement in the supporting leg
+- Head remains neutral
+- No unnecessary movement in the upper body 

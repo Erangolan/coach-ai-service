@@ -1,83 +1,83 @@
-# מבנה נתוני האימון
+# Training Data Structure
 
-## מבנה תיקיות
+## Directory Structure
 ```
 data/
-├── exercises/           # תיקיית התנועות
-│   ├── exercise_name/   # שם התנועה (למשל: squat, deadlift, pushup)
-│   │   ├── good/       # דוגמאות טובות של התנועה
-│   │   └── bad/        # דוגמאות לא טובות של התנועה
+├── exercises/           # Exercise directory
+│   ├── exercise_name/   # Name of the exercise (e.g., squat, deadlift, pushup)
+│   │   ├── good/       # Good examples of the exercise
+│   │   └── bad/        # Bad examples of the exercise
 │   └── ...
-└── documentation/       # תיעוד והסברים
-    ├── exercise_name/   # תיקייה לכל תנועה
-    │   ├── good_examples.md    # הסבר על דוגמאות טובות
-    │   └── bad_examples.md     # הסבר על דוגמאות לא טובות
+└── documentation/       # Documentation and explanations
+    ├── exercise_name/   # Folder for each exercise
+    │   ├── good_examples.md    # Explanation of good examples
+    │   └── bad_examples.md     # Explanation of bad examples
     └── ...
 ```
 
-## הנחיות להעלאת וידאו
+## Guidelines for Uploading Videos
 
-### מבנה שם קובץ
-- פורמט: `YYYY-MM-DD_exercise_name_description.mp4`
-- דוגמה: `2024-03-20_squat_deep_good_form.mp4`
+### File Name Format
+- Format: `YYYY-MM-DD_exercise_name_description.mp4`
+- Example: `2024-03-20_squat_deep_good_form.mp4`
 
-### דרישות וידאו
-1. איכות מינימלית: 720p
-2. אור טוב
-3. זווית צילום ברורה
-4. משך: 5-15 שניות
-5. רקע נקי ככל האפשר
+### Video Requirements
+1. Minimum quality: 720p
+2. Good lighting
+3. Clear shooting angle
+4. Duration: 5-15 seconds
+5. Background as clean as possible
 
-### תיעוד
-לכל תנועה יש ליצור שני קבצי תיעוד:
-1. `good_examples.md` - הסבר על מה נחשב לתנועה טובה
-2. `bad_examples.md` - הסבר על שגיאות נפוצות
+### Documentation
+For each exercise, create two documentation files:
+1. `good_examples.md` - Explanation of what is considered a good movement
+2. `bad_examples.md` - Explanation of common mistakes
 
-## תהליך הוספת תנועה חדשה
+## Adding a New Exercise
 
-1. צור תיקייה חדשה ב-`exercises/` עם שם התנועה
-2. צור תיקיות `good/` ו-`bad/` בתוך תיקיית התנועה
-3. צור תיקייה חדשה ב-`documentation/` עם שם התנועה
-4. צור קבצי תיעוד `good_examples.md` ו-`bad_examples.md`
-5. העלה את הוידאו המתאימים לתיקיות `good/` ו-`bad/`
-6. עדכן את התיעוד בהתאם
+1. Create a new folder in `exercises/` with the exercise name
+2. Create `good/` and `bad/` folders inside the exercise folder
+3. Create a new folder in `documentation/` with the exercise name
+4. Create documentation files `good_examples.md` and `bad_examples.md`
+5. Upload the appropriate videos to the `good/` and `bad/` folders
+6. Update the documentation accordingly
 
-## דוגמה לתיעוד
+## Example Documentation
 
 ### good_examples.md
 ```markdown
-# דוגמאות טובות לתנועת [שם התנועה]
+# Good Examples for [Exercise Name]
 
-## נקודות מפתח לתנועה טובה
-1. [נקודה 1]
-2. [נקודה 2]
-3. [נקודה 3]
+## Key Points for Good Movement
+1. [Point 1]
+2. [Point 2]
+3. [Point 3]
 
-## זוויות מומלצות
-- [זווית 1]: [טווח]
-- [זווית 2]: [טווח]
+## Example Videos
+- [Video 1]: [Description]
+- [Video 2]: [Description]
 
-## טיפים
-- [טיפ 1]
-- [טיפ 2]
+## Tips
+- [Tip 1]
+- [Tip 2]
 ```
 
 ### bad_examples.md
 ```markdown
-# שגיאות נפוצות בתנועת [שם התנועה]
+# Common Mistakes in [Exercise Name]
 
-## שגיאות נפוצות
-1. [שגיאה 1]
-   - תיאור
-   - איך לזהות
-   - איך לתקן
+## Common Mistakes
+1. [Mistake 1]
+   - Explanation
+   - How to avoid
+   - How to correct
 
-2. [שגיאה 2]
-   - תיאור
-   - איך לזהות
-   - איך לתקן
+2. [Mistake 2]
+   - Explanation
+   - How to avoid
+   - How to correct
 
-## סימני אזהרה
-- [סימן 1]
-- [סימן 2]
+## Example Videos
+- [Video 1]
+- [Video 2]
 ``` 
