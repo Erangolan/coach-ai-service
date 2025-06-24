@@ -21,7 +21,7 @@ from torch.nn.utils.rnn import pad_sequence
 from typing import List
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
-from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video
+from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier
 
 DATABASE_URL = "postgresql://erangolan:eran1234@localhost:5432/exercise_db"
 engine = create_engine(DATABASE_URL)
@@ -34,46 +34,23 @@ app = FastAPI()
 mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
-# חשוב: אותו מיפוי תוויות כמו באימון
+# Important: Same label mapping as in training
 LABELS = ["squat_good", "squat_bad"]
 label_to_idx = {label: i for i, label in enumerate(LABELS)}
 
-# === מודל LSTM (אותו כמו באימון) ===
-class LSTMClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=2, num_classes=2):
-        super(LSTMClassifier, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, num_classes)
-    
-    def forward(self, x, lengths):
-        # Pack padded sequence
-        packed_x = nn.utils.rnn.pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        
-        # Forward propagate LSTM
-        out, _ = self.lstm(packed_x)
-        
-        # Unpack sequence
-        out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
-        
-        # Get the last output for each sequence
-        last_outputs = []
-        for i, length in enumerate(lengths):
-            last_outputs.append(out[i, length-1])
-        last_outputs = torch.stack(last_outputs)
-        
-        # Decode the hidden state of the last time step
-        out = self.fc(last_outputs)
-        return out
-
-def load_model(exercise_name):
+def load_model(exercise_name, model_type='lstm', input_size=40, num_classes=2, bidirectional=True):
     model_path = f"models/{exercise_name}_model.pt"
     if not os.path.exists(model_path):
         raise ValueError(f"Model not found: {model_path}")
         
-    model = LSTMClassifier(input_size=40, num_classes=2)
-    model.load_state_dict(torch.load(model_path))
+    if model_type == 'cnn_lstm':
+        model = CNN_LSTM_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
+    elif model_type == 'lstm_transformer':
+        model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
+    else:
+        model = LSTMClassifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
+    
+    model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model.eval()
     return model
 
@@ -337,14 +314,28 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
 
     try:
         # Extract sequence from video using the correct pipeline
-        sequence = extract_sequence_from_video(video_path)
+        # The model was trained with input_size=51, so we need to match that
+        sequence = extract_sequence_from_video(video_path, use_keypoints=True)
         if sequence is None or len(sequence) == 0:
             raise HTTPException(status_code=400, detail="No valid pose detected in video.")
+        
+        # Ensure the sequence has the correct number of features
+        if sequence.shape[1] != 51:
+            # Pad or truncate to match the expected input size
+            if sequence.shape[1] < 51:
+                # Pad with zeros
+                padding = np.zeros((sequence.shape[0], 51 - sequence.shape[1]))
+                sequence = np.hstack([sequence, padding])
+            else:
+                # Truncate to 51 features
+                sequence = sequence[:, :51]
+        
         sequence_tensor = torch.tensor(sequence, dtype=torch.float32)
 
         # Load model for the given exercise
         try:
-            model = load_model(exercise_name)
+            # Your last training was with LSTM model, but it used input_size=51
+            model = load_model(exercise_name, model_type='lstm', input_size=51, num_classes=2, bidirectional=True)
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Model for exercise '{exercise_name}' not found: {str(e)}")
 
