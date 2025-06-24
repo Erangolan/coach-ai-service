@@ -321,5 +321,45 @@ def analyze_video():
             os.remove(video_path)
         return jsonify({'error': str(e)}), 500
 
+@app.post("/predict_exercise/")
+async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Form(...)):
+    """Predict if the movement in the uploaded video is good or bad for the given exercise."""
+    import uuid
+    import os
+    import torch
+    from fastapi import HTTPException
+    from pose_utils import extract_sequence_from_video
+
+    # Save uploaded video to a temp file
+    video_path = f"/tmp/{uuid.uuid4()}.mp4"
+    with open(video_path, "wb") as buffer:
+        buffer.write(await file.read())
+
+    try:
+        # Extract sequence from video using the correct pipeline
+        sequence = extract_sequence_from_video(video_path)
+        if sequence is None or len(sequence) == 0:
+            raise HTTPException(status_code=400, detail="No valid pose detected in video.")
+        sequence_tensor = torch.tensor(sequence, dtype=torch.float32)
+
+        # Load model for the given exercise
+        try:
+            model = load_model(exercise_name)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Model for exercise '{exercise_name}' not found: {str(e)}")
+
+        # Prepare input for model
+        input_tensor = sequence_tensor.unsqueeze(0)  # [1, seq_len, features]
+        lengths = torch.tensor([sequence_tensor.shape[0]])
+        with torch.no_grad():
+            output = model(input_tensor, lengths)
+            predicted = torch.argmax(output, dim=1).item()
+            confidence = torch.softmax(output, dim=1)[0][predicted].item()
+        predicted_label = "good" if predicted == 1 else "bad"
+        return {"prediction": predicted_label, "confidence": confidence}
+    finally:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
 if __name__ == '__main__':
     app.run(debug=True)
