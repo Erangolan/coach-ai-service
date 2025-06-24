@@ -26,9 +26,9 @@ class ExerciseDataset(Dataset):
         good_augmented_samples = []
         bad_augmented_samples = []
 
-        max_aug_per_video = 4  # לא יותר מ-4 אוגמנטציות לכל סרטון
+        max_aug_per_video = 4  # Limit to 4 augmentations per video
 
-        # אוגמנטציה עדינה ומוגבלת
+        # Gentle and limited augmentation
         for video_path, label in self.all_files:
             sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints)
             if len(sequence) == 0:
@@ -36,9 +36,9 @@ class ExerciseDataset(Dataset):
                     self.print_both(f"EMPTY SEQUENCE: {video_path}")
                 else:
                     print(f"EMPTY SEQUENCE: {video_path}")
-                continue  # דלג על ריק
+                continue  # Skip empty
             aug_sequences = apply_all_augmentations(sequence, debug_path=video_path)
-            aug_sequences = aug_sequences[:max_aug_per_video]  # מגביל כמות
+            aug_sequences = aug_sequences[:max_aug_per_video]  # Limit number of augmentations
             for aug_seq in aug_sequences:
                 if len(aug_seq) > 0:
                     self.samples.append((aug_seq, label, video_path))
@@ -49,12 +49,12 @@ class ExerciseDataset(Dataset):
                         bad_aug += 1
                         bad_augmented_samples.append((aug_seq, label, video_path))
 
-        # איזון oversampling עדין: bad <= good (בלי הגזמה)
+        # Gentle oversampling: bad <= good (no exaggeration)
         if bad_aug < good_aug and bad_augmented_samples:
             needed = good_aug - bad_aug
             extra_bad_samples = []
             for _ in range(needed):
-                # בחר אקראית דגימה bad קיימת (ולא צור עוד אוגמנטציות חדשות)
+                # Randomly pick an existing bad sample (do not create new augmentations)
                 aug_seq, label, video_path = random.choice(bad_augmented_samples)
                 self.samples.append((aug_seq, 0, video_path + "_extra_dup"))
                 bad_aug += 1

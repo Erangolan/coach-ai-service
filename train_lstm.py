@@ -2,18 +2,18 @@ import os
 import sys
 from datetime import datetime
 
-# יצירת תיקיית לוגים אם לא קיימת
+# Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
 
-# יצירת קובץ לוג עם timestamp
+# Create a log file with a timestamp
 log_file = f'logs/training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 log_file_handle = open(log_file, 'w')
 
-# שמירת stdout/stderr המקוריים
+# Save the original stdout/stderr
 original_stdout = sys.stdout
 original_stderr = sys.stderr
 
-# הפניית כל הפלט לקובץ
+# Redirect all output to the log file
 sys.stdout = log_file_handle
 sys.stderr = log_file_handle
 
@@ -92,10 +92,10 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts})")
 
     full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, print_both=print_both)
-    # אסוף שמות סרטונים מקוריים
+    # Collect original video names
     video_to_label = {}  # {filename: label}
     for _, label, filename in full_dataset.samples:
-        orig_file = filename.split('_extra_aug')[0]  # עוזר גם לדגימות מאוגמנטציה
+        orig_file = filename.split('_extra_aug')[0]  # Also works for augmented samples
         video_to_label[orig_file] = label
 
     all_videos = list(set(video_to_label.keys()))

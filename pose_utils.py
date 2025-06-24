@@ -112,13 +112,13 @@ def slow_down(sequence, factor=2):
     return np.repeat(sequence, factor, axis=0)
 
 def apply_all_augmentations(sequence, debug_path=None):
-    aug_sequences = [sequence]  # המקורי
-    aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))  # רעש עדין בלבד
+    aug_sequences = [sequence]  # original
+    aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))  # gentle noise only
     if len(sequence) > 3:
-        aug_sequences.append(speed_up(sequence, factor=2))   # האצה פי 2 בלבד
-    aug_sequences.append(slow_down(sequence, factor=2))      # האטה פי 2 בלבד
-    # לא מוסיפים רעש חזק, לא reverse, לא קיצוץ, לא שינוי מהירות אגרסיבי
-    # שמור על גיוון ריאליסטי ולא מוגזם
+        aug_sequences.append(speed_up(sequence, factor=2))   # speed up x2 only
+    aug_sequences.append(slow_down(sequence, factor=2))      # slow down x2 only
+    # Do not add strong noise, no reverse, no cropping, no aggressive speed changes
+    # Keep realistic and not exaggerated diversity
     if debug_path:
         print(f"{debug_path}: generated {len(aug_sequences)} augmented samples (orig len: {len(sequence)})")
     return [seq for seq in aug_sequences if len(seq) > 0]
