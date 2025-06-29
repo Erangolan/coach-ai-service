@@ -1,4 +1,6 @@
-from pose_utils import extract_sequence_from_video, apply_all_augmentations
+# exercise_dataset.py
+
+from pose_utils import extract_sequence_from_video, apply_all_augmentations, subtle_bad_augmentation
 import os
 import numpy as np
 import torch
@@ -28,7 +30,6 @@ class ExerciseDataset(Dataset):
 
         max_aug_per_video = 4  # Limit to 4 augmentations per video
 
-        # Gentle and limited augmentation
         for video_path, label in self.all_files:
             sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints)
             if len(sequence) == 0:
@@ -36,9 +37,9 @@ class ExerciseDataset(Dataset):
                     self.print_both(f"EMPTY SEQUENCE: {video_path}")
                 else:
                     print(f"EMPTY SEQUENCE: {video_path}")
-                continue  # Skip empty
+                continue
             aug_sequences = apply_all_augmentations(sequence, debug_path=video_path)
-            aug_sequences = aug_sequences[:max_aug_per_video]  # Limit number of augmentations
+            aug_sequences = aug_sequences[:max_aug_per_video]
             for aug_seq in aug_sequences:
                 if len(aug_seq) > 0:
                     self.samples.append((aug_seq, label, video_path))
@@ -49,20 +50,22 @@ class ExerciseDataset(Dataset):
                         bad_aug += 1
                         bad_augmented_samples.append((aug_seq, label, video_path))
 
-        # Gentle oversampling: bad <= good (no exaggeration)
-        if bad_aug < good_aug and bad_augmented_samples:
+        # איזון דאטה: הזרקת דגימות BAD מתוך good עם Augmentation (לא רק שכפול)
+        if bad_aug < good_aug and good_augmented_samples:
             needed = good_aug - bad_aug
             extra_bad_samples = []
             for _ in range(needed):
-                # Randomly pick an existing bad sample (do not create new augmentations)
-                aug_seq, label, video_path = random.choice(bad_augmented_samples)
-                self.samples.append((aug_seq, 0, video_path + "_extra_dup"))
-                bad_aug += 1
-                extra_bad_samples.append((aug_seq, 0, video_path + "_extra_dup"))
+                # תיצור bad מדגימת good אקראית (simulate mistake)
+                good_seq, _, video_path = random.choice(good_augmented_samples)
+                fake_bad = subtle_bad_augmentation(good_seq)
+                if len(fake_bad) > 0:
+                    self.samples.append((fake_bad, 0, video_path + "_bad_from_good"))
+                    bad_aug += 1
+                    extra_bad_samples.append((fake_bad, 0, video_path + "_bad_from_good"))
             if self.print_both:
-                self.print_both(f"Added {len(extra_bad_samples)} extra duplicated bad samples to balance dataset.")
+                self.print_both(f"Added {len(extra_bad_samples)} synthetic bad samples from good (augmentation) to balance dataset.")
             else:
-                print(f"Added {len(extra_bad_samples)} extra duplicated bad samples to balance dataset.")
+                print(f"Added {len(extra_bad_samples)} synthetic bad samples from good (augmentation) to balance dataset.")
 
         msg1 = f"\nTotal videos: Good={len(self.good_files)}, Bad={len(self.bad_files)}"
         msg2 = f"Total samples after augmentation: Good={good_aug}, Bad={bad_aug}"

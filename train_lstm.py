@@ -92,18 +92,72 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts})")
 
     full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, print_both=print_both)
+    
+    # Check if we have enough data
+    if len(full_dataset) == 0:
+        raise ValueError(f"No training data found for exercise '{exercise_name}'. Please check your data directory.")
+    
+    # Count samples per class
+    labels = [label for _, label, _ in full_dataset.samples]
+    label_counts = Counter(labels)
+    print_both(f"Data distribution: {label_counts}")
+    
+    if len(label_counts) < 2:
+        raise ValueError(f"Need at least 2 classes (good/bad), but found only {len(label_counts)} class(es).")
+    
+    min_samples = min(label_counts.values())
+    if min_samples < 2:
+        print_both(f"Warning: Class with label {min(label_counts, key=label_counts.get)} has only {min_samples} samples.")
+        print_both("Consider adding more training data for better results.")
+    
     # Collect original video names
     video_to_label = {}  # {filename: label}
     for _, label, filename in full_dataset.samples:
-        orig_file = filename.split('_extra_aug')[0]  # Also works for augmented samples
-        video_to_label[orig_file] = label
+        video_to_label[filename] = label
 
+    # Debug: Print video distribution
+    print_both(f"Total samples in dataset: {len(full_dataset.samples)}")
+    print_both(f"Unique videos found: {len(set(video_to_label.keys()))}")
+    
+    # Count videos per class
+    video_class_counts = Counter(video_to_label.values())
+    print_both(f"Videos per class: {video_class_counts}")
+    
+    # Show some example filenames
+    print_both("Sample filenames:")
+    for i, (_, label, filename) in enumerate(full_dataset.samples[:5]):
+        print_both(f"  {i}: {filename} -> label {label}")
+    
+    # Split by video (not by sample)
     all_videos = list(set(video_to_label.keys()))
-    train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42, stratify=[video_to_label[v] for v in all_videos])
-    train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42, stratify=[video_to_label[v] for v in train_videos])
+    print_both(f"All videos: {all_videos}")
+    
+    # Check if we have enough samples for stratified splitting
+    labels_for_videos = [video_to_label[v] for v in all_videos]
+    label_counts = Counter(labels_for_videos)
+    min_samples_per_class = min(label_counts.values())
+    
+    print_both(f"Labels for videos: {labels_for_videos}")
+    print_both(f"Label counts: {label_counts}")
+    print_both(f"Min samples per class: {min_samples_per_class}")
+    
+    if min_samples_per_class >= 2:
+        # Use stratified splitting if we have enough samples
+        train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42, stratify=labels_for_videos)
+        train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42, stratify=[video_to_label[v] for v in train_videos])
+    else:
+        # Use regular splitting if we don't have enough samples
+        print_both(f"Warning: Insufficient samples for stratified splitting. Using regular splitting.")
+        print_both(f"Label counts: {label_counts}")
+        train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42)
+        train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42)
+    
+    print_both(f"Train videos: {len(train_videos)}")
+    print_both(f"Val videos: {len(val_videos)}")
+    print_both(f"Test videos: {len(test_videos)}")
 
     def split_by_videos(samples, videos):
-        return [i for i, sample in enumerate(samples) if sample[2].split('_extra_aug')[0] in videos]
+        return [i for i, sample in enumerate(samples) if sample[2] in videos]
 
     train_idx = split_by_videos(full_dataset.samples, train_videos)
     val_idx = split_by_videos(full_dataset.samples, val_videos)
