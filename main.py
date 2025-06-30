@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Depends, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
@@ -14,14 +15,15 @@ from fastapi import HTTPException
 from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
 import numpy as np
+import base64
+import io
+from typing import List, Dict, Any
 
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from typing import List
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
-from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier
+from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts
 
 DATABASE_URL = "postgresql://erangolan:eran1234@localhost:5432/exercise_db"
 engine = create_engine(DATABASE_URL)
@@ -29,6 +31,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # MediaPipe Holistic
 mp_holistic = mp.solutions.holistic
@@ -247,56 +258,52 @@ def classify_video(file: UploadFile = File(...)):
 
     return {"prediction": predicted_label}
 
-@app.route('/analyze', methods=['POST'])
-def analyze_video():
-    if 'video' not in request.files:
-        return jsonify({'error': 'No video file provided'}), 400
+@app.post("/analyze/")
+async def analyze_video(file: UploadFile = File(...), exercise_name: str = Form("right-knee-to-90-degrees")):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No selected file")
         
-    video_file = request.files['video']
-    exercise_name = request.form.get('exercise', 'right-knee-to-90-degrees')
+    if not file.filename.endswith('.mp4'):
+        raise HTTPException(status_code=400, detail="Only MP4 files are supported")
     
-    if video_file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-        
-    if not video_file.filename.endswith('.mp4'):
-        return jsonify({'error': 'Only MP4 files are supported'}), 400
-    
-    # שמירת הקובץ
-    filename = secure_filename(video_file.filename)
+    # Save the file
+    filename = file.filename
     video_path = os.path.join('uploads', filename)
     os.makedirs('uploads', exist_ok=True)
-    video_file.save(video_path)
+    
+    with open(video_path, "wb") as buffer:
+        buffer.write(await file.read())
     
     try:
-        # חילוץ רצף הזוויות
+        # Extract angle sequence
         sequence = extract_sequence_from_video(video_path)
         if not sequence:
-            return jsonify({'error': 'No valid poses detected in video'}), 400
+            raise HTTPException(status_code=400, detail="No valid poses detected in video")
         
-        # טעינת המודל
+        # Load model
         model = load_model(exercise_name)
         
-        # הכנת הנתונים למודל
+        # Prepare data for model
         sequence_tensor = torch.tensor([sequence], dtype=torch.float32)
         lengths = torch.tensor([len(sequence)])
         
-        # חיזוי
+        # Prediction
         with torch.no_grad():
             outputs = model(sequence_tensor, lengths)
             _, predicted = torch.max(outputs, 1)
             
-        # ניקוי
+        # Cleanup
         os.remove(video_path)
         
-        return jsonify({
+        return {
             'prediction': 'good' if predicted.item() == 0 else 'bad',
             'confidence': torch.softmax(outputs, dim=1)[0][predicted].item()
-        })
+        }
         
     except Exception as e:
         if os.path.exists(video_path):
             os.remove(video_path)
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict_exercise/")
 async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Form(...)):
@@ -352,5 +359,301 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
         if os.path.exists(video_path):
             os.remove(video_path)
 
+
+@app.websocket("/ws/video-analysis-base64/{exercise_name}")
+async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: str):
+    await websocket.accept()
+    holistic = None
+
+    try:
+        # ==== הגדר פה בדיוק כמו באימון! ====
+        # תעדכן focus_parts בדיוק כמו ששימשת בשורת האימון
+        focus_parts = ['right_knee', 'torso']
+        use_keypoints = True  # כי השתמשת בפרמטר --use_keypoints
+        focus_indices = get_angle_indices_by_parts(focus_parts)
+        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+
+        print(f"[DEBUG] Loading model for exercise: {exercise_name}")
+        # עדכן לפי איך שטענת את המודל שלך
+        model = load_model(exercise_name, model_type='lstm', input_size=input_size, num_classes=2, bidirectional=True)
+        model.eval()
+
+        mp_holistic = mp.solutions.holistic
+        holistic = mp_holistic.Holistic(
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        print("[DEBUG] Model and MediaPipe loaded. Waiting for frames...")
+
+        await websocket.send_json({
+            "type": "status",
+            "message": f"Ready to analyze {exercise_name} exercise (base64)",
+            "model_loaded": True
+        })
+
+        window_size = 20
+        step = 3
+        frame_buffer = []
+        frame_count = 0
+        rep_count = 0
+        prev_label = 0
+
+        while True:
+            try:
+                data = await websocket.receive_text()
+                if data.startswith('data:image/'):
+                    data = data.split(',')[1]
+                binary_data = base64.b64decode(data)
+                nparr = np.frombuffer(binary_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                if frame is None:
+                    print("[ERROR] Frame decode failed (cv2.imdecode returned None)")
+                    continue
+
+                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image.flags.writeable = False
+                results = holistic.process(image)
+
+                if not results.pose_landmarks:
+                    await websocket.send_json({
+                        "type": "pose_missing",
+                        "frame_count": frame_count
+                    })
+                    continue
+
+                # === בדיוק כמו באימון! ===
+                angles = extract_angles(results.pose_landmarks)
+                features = [angles[i] for i in focus_indices] if focus_indices else angles
+                if use_keypoints:
+                    keypoints = extract_keypoints_xyz(results.pose_landmarks)
+                    features += keypoints
+
+                # השלמת אפסים, קיצוץ אקסטרה, תמיד בגודל input_size
+                if len(features) < input_size:
+                    features.extend([0.0] * (input_size - len(features)))
+                elif len(features) > input_size:
+                    features = features[:input_size]
+
+                # debug קצר לוודא שהכל טוב
+                # print("len(features):", len(features))
+
+                frame_buffer.append(features)
+                frame_count += 1
+                if len(frame_buffer) > window_size:
+                    frame_buffer = frame_buffer[-window_size:]
+
+                # נריץ מודל כל STEP פריימים בלבד
+                if len(frame_buffer) == window_size and frame_count % step == 0:
+                    sequence = np.array(frame_buffer)
+                    sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
+                    lengths = torch.tensor([window_size])
+                    with torch.no_grad():
+                        output = model(sequence_tensor, lengths)
+                        predicted = torch.argmax(output, dim=1).item()
+                        confidence = torch.softmax(output, dim=1)[0][predicted].item()
+                    prediction = "good" if predicted == 1 else "bad"
+
+                    # === ספירת חזרות: מעבר bad→good ===
+                    if predicted == 1 and prev_label == 0:
+                        rep_count += 1
+                        await websocket.send_json({
+                            "type": "rep_detected",
+                            "rep_count": rep_count,
+                            "quality": prediction,
+                            "confidence": float(confidence),
+                            "frame": frame_count
+                        })
+                    prev_label = predicted
+
+                    await websocket.send_json({
+                        "type": "prediction",
+                        "frame_count": frame_count,
+                        "prediction": prediction,
+                        "confidence": float(confidence),
+                        "rep_count": rep_count
+                    })
+
+                # הודעה תמידית לעדכון
+                await websocket.send_json({
+                    "type": "frame_processed",
+                    "frame_count": frame_count,
+                    "pose_detected": True
+                })
+
+            except WebSocketDisconnect:
+                print("[DEBUG] WebSocket disconnected")
+                break
+            except Exception as e:
+                print(f"[ERROR] Exception in frame processing: {e}")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Error processing frame: {str(e)}"
+                    })
+                except:
+                    break
+
+    except Exception as e:
+        print(f"[ERROR] WebSocket error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            })
+        except:
+            pass
+    finally:
+        if holistic is not None:
+            holistic.close()
+        print("[DEBUG] MediaPipe holistic closed.")
+
+async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: str):
+    """WebSocket endpoint for real-time video analysis using base64 encoded frames (with debug prints)"""
+    await websocket.accept()
+    holistic = None
+
+    try:
+        print(f"[DEBUG] Loading model for exercise: {exercise_name}")
+        model = load_model(exercise_name, model_type='lstm', input_size=51, num_classes=2, bidirectional=True)
+        model.eval()
+
+        mp_holistic = mp.solutions.holistic
+        holistic = mp_holistic.Holistic(
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        print("[DEBUG] Model and MediaPipe loaded. Waiting for frames...")
+
+        await websocket.send_json({
+            "type": "status",
+            "message": f"Ready to analyze {exercise_name} exercise (base64)",
+            "model_loaded": True
+        })
+
+        frame_buffer = []
+        frame_count = 0
+
+        while True:
+            try:
+                data = await websocket.receive_text()
+                print("[DEBUG] Received frame from client")
+                try:
+                    if data.startswith('data:image/'):
+                        data = data.split(',')[1]
+                    binary_data = base64.b64decode(data)
+                    nparr = np.frombuffer(binary_data, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                except Exception as e:
+                    print(f"[ERROR] Failed to decode base64 frame: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Failed to decode base64 frame: {str(e)}"
+                    })
+                    continue
+
+                if frame is None:
+                    print("[ERROR] Frame decode failed (cv2.imdecode returned None)")
+                    continue
+
+                print("[DEBUG] Frame decoded successfully. Processing with MediaPipe...")
+                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image.flags.writeable = False
+                results = holistic.process(image)
+
+                if not results.pose_landmarks:
+                    print("[DEBUG] No pose detected in frame.")
+                    continue
+
+                print("[DEBUG] Pose detected!")
+                angles = extract_angles(results.pose_landmarks)
+                if not angles:
+                    print("[DEBUG] No angles extracted from pose.")
+                    continue
+                keypoints = extract_keypoints_xyz(results.pose_landmarks)
+                features = angles + keypoints
+                if len(features) < 51:
+                    features.extend([0.0] * (51 - len(features)))
+                elif len(features) > 51:
+                    features = features[:51]
+                frame_buffer.append(features)
+                frame_count += 1
+                print(f"[DEBUG] Frame {frame_count} added to buffer. Buffer size: {len(frame_buffer)}")
+                if frame_count % 10 == 0 and len(frame_buffer) >= 5:
+                    print(f"[DEBUG] Running prediction on buffer of size {len(frame_buffer)}")
+                    sequence = np.array(frame_buffer)
+                    sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
+                    lengths = torch.tensor([len(frame_buffer)])
+                    with torch.no_grad():
+                        output = model(sequence_tensor, lengths)
+                        predicted = torch.argmax(output, dim=1).item()
+                        confidence = torch.softmax(output, dim=1)[0][predicted].item()
+                    prediction = "good" if predicted == 1 else "bad"
+                    print(f"[DEBUG] Prediction: {prediction}, Confidence: {confidence}")
+                    await websocket.send_json({
+                        "type": "prediction",
+                        "frame_count": frame_count,
+                        "prediction": prediction,
+                        "confidence": float(confidence),
+                        "buffer_size": len(frame_buffer)
+                    })
+                    frame_buffer = frame_buffer[-20:]
+
+                await websocket.send_json({
+                    "type": "frame_processed",
+                    "frame_count": frame_count,
+                    "pose_detected": results.pose_landmarks is not None
+                })
+
+            except WebSocketDisconnect:
+                print("[DEBUG] WebSocket disconnected")
+                break
+            except Exception as e:
+                print(f"[ERROR] Exception in frame processing: {e}")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Error processing frame: {str(e)}"
+                    })
+                except:
+                    break
+
+    except Exception as e:
+        print(f"[ERROR] WebSocket error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            })
+        except:
+            pass
+    finally:
+        if holistic is not None:
+            holistic.close()
+        print("[DEBUG] MediaPipe holistic closed.")
+
+def extract_keypoints_xyz(landmarks):
+    """Extract keypoint coordinates for additional features"""
+    indices = [
+        mp.solutions.holistic.PoseLandmark.RIGHT_SHOULDER,
+        mp.solutions.holistic.PoseLandmark.RIGHT_ELBOW,
+        mp.solutions.holistic.PoseLandmark.RIGHT_WRIST,
+        mp.solutions.holistic.PoseLandmark.RIGHT_HIP,
+        mp.solutions.holistic.PoseLandmark.RIGHT_KNEE,
+        mp.solutions.holistic.PoseLandmark.RIGHT_ANKLE,
+        mp.solutions.holistic.PoseLandmark.LEFT_SHOULDER,
+        mp.solutions.holistic.PoseLandmark.LEFT_ELBOW,
+        mp.solutions.holistic.PoseLandmark.LEFT_WRIST,
+        mp.solutions.holistic.PoseLandmark.LEFT_HIP,
+        mp.solutions.holistic.PoseLandmark.LEFT_KNEE,
+        mp.solutions.holistic.PoseLandmark.LEFT_ANKLE,
+    ]
+    coords = []
+    for idx in indices:
+        pt = landmarks.landmark[idx]
+        coords.extend([pt.x, pt.y, pt.z])
+    return coords
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
