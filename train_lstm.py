@@ -33,6 +33,15 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from collections import Counter
 
+LABELS_MAP = {
+    "good": 0,
+    "bad-knee-angle": 1,
+    "bad-lower-knee": 2,
+    "idle": 3,
+}
+LABELS = list(LABELS_MAP.keys())
+label_to_idx = LABELS_MAP
+
 def print_both(message):
     print(message, file=log_file_handle, flush=True)
     print(message, file=original_stdout, flush=True)
@@ -72,7 +81,7 @@ def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_m
         y_true += labels.cpu().numpy().tolist()
         y_pred += predicted.cpu().numpy().tolist()
     cm = confusion_matrix(y_true, y_pred)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["bad", "good"])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=LABELS)
     disp.plot(cmap=plt.cm.Blues)
     plt.title("Confusion Matrix (Test Set)")
     plt.savefig(filename)
@@ -185,25 +194,21 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     # Count class samples for weights
     labels = [label for _, label, _ in full_dataset.samples]
     label_counts = Counter(labels)
-    num_good = label_counts.get(1, 0)
-    num_bad = label_counts.get(0, 0)
-    total = num_good + num_bad
-    class_weights = [0, 0]
-    if num_bad > 0 and num_good > 0:
-        class_weights[0] = total / (2 * num_bad)
-        class_weights[1] = total / (2 * num_good)
-    else:
-        class_weights = [1.0, 1.0]
+    num_classes = 4  # עדכן ל-4 קטגוריות (good, bad-knee-angle, bad-lower-knee, idle)
+    class_weights = [0] * num_classes
+    total = sum(label_counts.values())
+    for i in range(num_classes):
+        class_weights[i] = total / (num_classes * label_counts.get(i, 1))
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
     print_both(f"Class weights: {class_weights}")
 
     # Choose model
     if model_type == 'cnn_lstm':
-        model = CNN_LSTM_Classifier(input_size=input_size, num_classes=2, bidirectional=bidirectional)
+        model = CNN_LSTM_Classifier(input_size=input_size, num_classes=4, bidirectional=bidirectional)
     elif model_type == 'lstm_transformer':
-        model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=2, bidirectional=bidirectional)
+        model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=4, bidirectional=bidirectional)
     else:
-        model = LSTMClassifier(input_size=input_size, num_classes=2, bidirectional=bidirectional)
+        model = LSTMClassifier(input_size=input_size, num_classes=4, bidirectional=bidirectional)
     model.to(device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)

@@ -46,21 +46,25 @@ mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
 # Important: Same label mapping as in training
-LABELS = ["squat_good", "squat_bad"]
-label_to_idx = {label: i for i, label in enumerate(LABELS)}
+LABELS_MAP = {
+    "good": 0,
+    "bad-knee-angle": 1,
+    "bad-lower-knee": 2,
+    "idle": 3,
+}
+LABELS = list(LABELS_MAP.keys())
+label_to_idx = LABELS_MAP
 
-def load_model(exercise_name, model_type='lstm', input_size=40, num_classes=2, bidirectional=True):
+def load_model(exercise_name, model_type='lstm', input_size=40, num_classes=4, bidirectional=True):
     model_path = f"models/{exercise_name}_model.pt"
     if not os.path.exists(model_path):
         raise ValueError(f"Model not found: {model_path}")
-        
     if model_type == 'cnn_lstm':
         model = CNN_LSTM_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     elif model_type == 'lstm_transformer':
         model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     else:
         model = LSTMClassifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
-    
     model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model.eval()
     return model
@@ -235,7 +239,7 @@ def evaluate_exercise(exercise_name: str = Form(...), file: UploadFile = File(..
     return {"similarity_score": score, "message": f"Similarity to reference: {score}%"}
 
 @app.post("/classify/")
-def classify_video(file: UploadFile = File(...)):
+def classify_video(file: UploadFile = File(...), exercise_name: str = Form(...)):
     # 1. שמירת הקובץ
     video_path = f"/tmp/{uuid.uuid4()}.mp4"
     with open(video_path, "wb") as buffer:
@@ -295,8 +299,11 @@ async def analyze_video(file: UploadFile = File(...), exercise_name: str = Form(
         # Cleanup
         os.remove(video_path)
         
+        # Return actual label from model instead of binary good/bad
+        predicted_label = LABELS[predicted.item()]
+        
         return {
-            'prediction': 'good' if predicted.item() == 0 else 'bad',
+            'prediction': predicted_label,
             'confidence': torch.softmax(outputs, dim=1)[0][predicted].item()
         }
         
@@ -320,29 +327,22 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
         buffer.write(await file.read())
 
     try:
+        # === בדיוק כמו באימון! ===
+        focus_parts = ['right_knee', 'torso']
+        use_keypoints = True
+        focus_indices = get_angle_indices_by_parts(focus_parts)
+        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        
         # Extract sequence from video using the correct pipeline
-        # The model was trained with input_size=51, so we need to match that
-        sequence = extract_sequence_from_video(video_path, use_keypoints=True)
+        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints)
         if sequence is None or len(sequence) == 0:
             raise HTTPException(status_code=400, detail="No valid pose detected in video.")
-        
-        # Ensure the sequence has the correct number of features
-        if sequence.shape[1] != 51:
-            # Pad or truncate to match the expected input size
-            if sequence.shape[1] < 51:
-                # Pad with zeros
-                padding = np.zeros((sequence.shape[0], 51 - sequence.shape[1]))
-                sequence = np.hstack([sequence, padding])
-            else:
-                # Truncate to 51 features
-                sequence = sequence[:, :51]
         
         sequence_tensor = torch.tensor(sequence, dtype=torch.float32)
 
         # Load model for the given exercise
         try:
-            # Your last training was with LSTM model, but it used input_size=51
-            model = load_model(exercise_name, model_type='lstm', input_size=51, num_classes=2, bidirectional=True)
+            model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Model for exercise '{exercise_name}' not found: {str(e)}")
 
@@ -353,12 +353,13 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
             output = model(input_tensor, lengths)
             predicted = torch.argmax(output, dim=1).item()
             confidence = torch.softmax(output, dim=1)[0][predicted].item()
-        predicted_label = "good" if predicted == 1 else "bad"
+        
+        # Return actual label from model instead of binary good/bad
+        predicted_label = LABELS[predicted]
         return {"prediction": predicted_label, "confidence": confidence}
     finally:
         if os.path.exists(video_path):
             os.remove(video_path)
-
 
 @app.websocket("/ws/video-analysis-base64/{exercise_name}")
 async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: str):
@@ -366,16 +367,15 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
     holistic = None
 
     try:
-        # ==== הגדר פה בדיוק כמו באימון! ====
-        # תעדכן focus_parts בדיוק כמו ששימשת בשורת האימון
         focus_parts = ['right_knee', 'torso']
-        use_keypoints = True  # כי השתמשת בפרמטר --use_keypoints
+        use_keypoints = True
         focus_indices = get_angle_indices_by_parts(focus_parts)
         input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
 
-        print(f"[DEBUG] Loading model for exercise: {exercise_name}")
-        # עדכן לפי איך שטענת את המודל שלך
-        model = load_model(exercise_name, model_type='lstm', input_size=input_size, num_classes=2, bidirectional=True)
+        model = load_model(
+            exercise_name, model_type='cnn_lstm',
+            input_size=input_size, num_classes=4, bidirectional=True
+        )
         model.eval()
 
         mp_holistic = mp.solutions.holistic
@@ -383,20 +383,19 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-        print("[DEBUG] Model and MediaPipe loaded. Waiting for frames...")
+
+        LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
+        BUFFER_SIZE = 10    # או 50 אם אתה מעדיף
+
+        frame_buffer = []
+        frame_count = 0
+        rep_counts = {label: 0 for label in LABELS}
 
         await websocket.send_json({
             "type": "status",
             "message": f"Ready to analyze {exercise_name} exercise (base64)",
             "model_loaded": True
         })
-
-        window_size = 20
-        step = 3
-        frame_buffer = []
-        frame_count = 0
-        rep_count = 0
-        prev_label = 0
 
         while True:
             try:
@@ -408,7 +407,6 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
                 if frame is None:
-                    print("[ERROR] Frame decode failed (cv2.imdecode returned None)")
                     continue
 
                 image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -416,65 +414,36 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                 results = holistic.process(image)
 
                 if not results.pose_landmarks:
-                    await websocket.send_json({
-                        "type": "pose_missing",
-                        "frame_count": frame_count
-                    })
                     continue
 
-                # === בדיוק כמו באימון! ===
                 angles = extract_angles(results.pose_landmarks)
                 features = [angles[i] for i in focus_indices] if focus_indices else angles
                 if use_keypoints:
                     keypoints = extract_keypoints_xyz(results.pose_landmarks)
                     features += keypoints
-
-                # השלמת אפסים, קיצוץ אקסטרה, תמיד בגודל input_size
-                if len(features) < input_size:
-                    features.extend([0.0] * (input_size - len(features)))
-                elif len(features) > input_size:
-                    features = features[:input_size]
-
-                # debug קצר לוודא שהכל טוב
-                # print("len(features):", len(features))
-
                 frame_buffer.append(features)
                 frame_count += 1
-                if len(frame_buffer) > window_size:
-                    frame_buffer = frame_buffer[-window_size:]
 
-                # נריץ מודל כל STEP פריימים בלבד
-                if len(frame_buffer) == window_size and frame_count % step == 0:
+                if len(frame_buffer) == BUFFER_SIZE:
                     sequence = np.array(frame_buffer)
                     sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
-                    lengths = torch.tensor([window_size])
+                    lengths = torch.tensor([BUFFER_SIZE])
                     with torch.no_grad():
                         output = model(sequence_tensor, lengths)
                         predicted = torch.argmax(output, dim=1).item()
                         confidence = torch.softmax(output, dim=1)[0][predicted].item()
-                    prediction = "good" if predicted == 1 else "bad"
-
-                    # === ספירת חזרות: מעבר bad→good ===
-                    if predicted == 1 and prev_label == 0:
-                        rep_count += 1
-                        await websocket.send_json({
-                            "type": "rep_detected",
-                            "rep_count": rep_count,
-                            "quality": prediction,
-                            "confidence": float(confidence),
-                            "frame": frame_count
-                        })
-                    prev_label = predicted
+                    predicted_label = LABELS[predicted]
+                    rep_counts[predicted_label] += 1
 
                     await websocket.send_json({
                         "type": "prediction",
                         "frame_count": frame_count,
-                        "prediction": prediction,
+                        "prediction": predicted_label,
                         "confidence": float(confidence),
-                        "rep_count": rep_count
+                        "rep_counts": rep_counts
                     })
+                    frame_buffer = []  # מתחילים מחדש
 
-                # הודעה תמידית לעדכון
                 await websocket.send_json({
                     "type": "frame_processed",
                     "frame_count": frame_count,
@@ -508,14 +477,22 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
             holistic.close()
         print("[DEBUG] MediaPipe holistic closed.")
 
+
+@app.websocket("/ws/video-analysis-base64/{exercise_name}")
 async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: str):
-    """WebSocket endpoint for real-time video analysis using base64 encoded frames (with debug prints)"""
     await websocket.accept()
     holistic = None
 
     try:
-        print(f"[DEBUG] Loading model for exercise: {exercise_name}")
-        model = load_model(exercise_name, model_type='lstm', input_size=51, num_classes=2, bidirectional=True)
+        focus_parts = ['right_knee', 'torso']
+        use_keypoints = True
+        focus_indices = get_angle_indices_by_parts(focus_parts)
+        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+
+        model = load_model(
+            exercise_name, model_type='cnn_lstm',
+            input_size=input_size, num_classes=4, bidirectional=True
+        )
         model.eval()
 
         mp_holistic = mp.solutions.holistic
@@ -523,7 +500,17 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-        print("[DEBUG] Model and MediaPipe loaded. Waiting for frames...")
+
+        LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
+        BUFFER_SIZE = 40
+        VOTING_WINDOW = 8  # הצבעות – אפשר גם 1 (בלי majority)
+
+        frame_buffer = deque(maxlen=BUFFER_SIZE)
+        pred_window = deque(maxlen=VOTING_WINDOW)
+        rep_counts = {label: 0 for label in LABELS}
+        frame_count = 0
+        last_predicted_label = "idle"
+        last_rep_frame = 0
 
         await websocket.send_json({
             "type": "status",
@@ -531,78 +518,201 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
             "model_loaded": True
         })
 
-        frame_buffer = []
-        frame_count = 0
-
         while True:
             try:
                 data = await websocket.receive_text()
-                print("[DEBUG] Received frame from client")
-                try:
-                    if data.startswith('data:image/'):
-                        data = data.split(',')[1]
-                    binary_data = base64.b64decode(data)
-                    nparr = np.frombuffer(binary_data, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                except Exception as e:
-                    print(f"[ERROR] Failed to decode base64 frame: {e}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": f"Failed to decode base64 frame: {str(e)}"
-                    })
-                    continue
+                if data.startswith('data:image/'):
+                    data = data.split(',')[1]
+                binary_data = base64.b64decode(data)
+                nparr = np.frombuffer(binary_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
                 if frame is None:
-                    print("[ERROR] Frame decode failed (cv2.imdecode returned None)")
                     continue
 
-                print("[DEBUG] Frame decoded successfully. Processing with MediaPipe...")
                 image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 image.flags.writeable = False
                 results = holistic.process(image)
 
                 if not results.pose_landmarks:
-                    print("[DEBUG] No pose detected in frame.")
                     continue
 
-                print("[DEBUG] Pose detected!")
                 angles = extract_angles(results.pose_landmarks)
-                if not angles:
-                    print("[DEBUG] No angles extracted from pose.")
-                    continue
-                keypoints = extract_keypoints_xyz(results.pose_landmarks)
-                features = angles + keypoints
-                if len(features) < 51:
-                    features.extend([0.0] * (51 - len(features)))
-                elif len(features) > 51:
-                    features = features[:51]
+                features = [angles[i] for i in focus_indices] if focus_indices else angles
+                if use_keypoints:
+                    keypoints = extract_keypoints_xyz(results.pose_landmarks)
+                    features += keypoints
                 frame_buffer.append(features)
                 frame_count += 1
-                print(f"[DEBUG] Frame {frame_count} added to buffer. Buffer size: {len(frame_buffer)}")
-                if frame_count % 10 == 0 and len(frame_buffer) >= 5:
-                    print(f"[DEBUG] Running prediction on buffer of size {len(frame_buffer)}")
+
+                if len(frame_buffer) == BUFFER_SIZE:
                     sequence = np.array(frame_buffer)
                     sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
-                    lengths = torch.tensor([len(frame_buffer)])
+                    lengths = torch.tensor([BUFFER_SIZE])
                     with torch.no_grad():
                         output = model(sequence_tensor, lengths)
                         predicted = torch.argmax(output, dim=1).item()
                         confidence = torch.softmax(output, dim=1)[0][predicted].item()
-                    prediction = "good" if predicted == 1 else "bad"
-                    print(f"[DEBUG] Prediction: {prediction}, Confidence: {confidence}")
+                    predicted_label = LABELS[predicted]
+
+                    pred_window.append(predicted_label)
+                    # majority voting – או פשוט קח predicted_label אם אתה לא רוצה להחליק
+                    voted_label = max(set(pred_window), key=pred_window.count)
+
+                    count_this = False
+                    # נחשב חזרה רק כשיש מעבר מ-idle/קטגוריה אחרת
+                    if (voted_label != last_predicted_label 
+                        and voted_label != "idle" 
+                        and frame_count - last_rep_frame > BUFFER_SIZE // 2):
+                        rep_counts[voted_label] += 1
+                        count_this = True
+                        last_predicted_label = voted_label
+                        last_rep_frame = frame_count
+
                     await websocket.send_json({
                         "type": "prediction",
                         "frame_count": frame_count,
-                        "prediction": prediction,
+                        "prediction": voted_label,
                         "confidence": float(confidence),
-                        "buffer_size": len(frame_buffer)
+                        "rep_counts": rep_counts,
+                        "count_this": count_this
                     })
-                    frame_buffer = frame_buffer[-20:]
 
                 await websocket.send_json({
                     "type": "frame_processed",
                     "frame_count": frame_count,
-                    "pose_detected": results.pose_landmarks is not None
+                    "pose_detected": True
+                })
+
+            except WebSocketDisconnect:
+                print("[DEBUG] WebSocket disconnected")
+                break
+            except Exception as e:
+                print(f"[ERROR] Exception in frame processing: {e}")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Error processing frame: {str(e)}"
+                    })
+                except:
+                    break
+
+    except Exception as e:
+        print(f"[ERROR] WebSocket error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"WebSocket error: {str(e)}"
+            })
+        except:
+            pass
+    finally:
+        if holistic is not None:
+            holistic.close()
+        print("[DEBUG] MediaPipe holistic closed.")
+
+    import collections
+    await websocket.accept()
+    holistic = None
+
+    try:
+        focus_parts = ['right_knee', 'torso']
+        use_keypoints = True
+        focus_indices = get_angle_indices_by_parts(focus_parts)
+        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+
+        model = load_model(
+            exercise_name, model_type='cnn_lstm',
+            input_size=input_size, num_classes=4, bidirectional=True
+        )
+        model.eval()
+
+        mp_holistic = mp.solutions.holistic
+        holistic = mp_holistic.Holistic(
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+
+        LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
+        BUFFER_SIZE = 10      # החלון המחליק - חזרה אחת
+        VOTE_WINDOW = 7       # לכמה תחזיות אחרונות מסתכלים
+        frame_buffer = collections.deque(maxlen=BUFFER_SIZE)
+        pred_window = collections.deque(maxlen=VOTE_WINDOW)
+        last_predicted_label = None
+        last_rep_frame = -BUFFER_SIZE
+        rep_counts = {label: 0 for label in LABELS}
+        frame_count = 0
+
+        await websocket.send_json({
+            "type": "status",
+            "message": f"Ready to analyze {exercise_name} exercise (base64)",
+            "model_loaded": True
+        })
+
+        while True:
+            try:
+                data = await websocket.receive_text()
+                if data.startswith('data:image/'):
+                    data = data.split(',')[1]
+                binary_data = base64.b64decode(data)
+                nparr = np.frombuffer(binary_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                if frame is None:
+                    continue
+
+                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image.flags.writeable = False
+                results = holistic.process(image)
+
+                if not results.pose_landmarks:
+                    continue
+
+                angles = extract_angles(results.pose_landmarks)
+                features = [angles[i] for i in focus_indices] if focus_indices else angles
+                if use_keypoints:
+                    keypoints = extract_keypoints_xyz(results.pose_landmarks)
+                    features += keypoints
+                frame_buffer.append(features)
+                frame_count += 1
+
+                if len(frame_buffer) == BUFFER_SIZE:
+                    sequence = np.array(frame_buffer)
+                    sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
+                    lengths = torch.tensor([BUFFER_SIZE])
+                    with torch.no_grad():
+                        output = model(sequence_tensor, lengths)
+                        predicted = torch.argmax(output, dim=1).item()
+                        confidence = torch.softmax(output, dim=1)[0][predicted].item()
+                    predicted_label = LABELS[predicted]
+
+                    # majority voting אם רוצים, אחרת תוכל להוריד
+                    pred_window.append(predicted_label)
+                    voted_label = collections.Counter(pred_window).most_common(1)[0][0]
+
+                    # תספור חזרה רק אם יש מעבר/לא idle, אבל תשלח prediction תמיד!
+                    count_this = (voted_label != last_predicted_label and voted_label != "idle" and frame_count - last_rep_frame > BUFFER_SIZE // 2)
+                    if count_this:
+                        rep_counts[voted_label] += 1
+                        last_predicted_label = voted_label
+                        last_rep_frame = frame_count
+
+                    # שולח תמיד את הניבוי (גם אם לא השתנה)
+                    await websocket.send_json({
+                        "type": "prediction",
+                        "frame_count": frame_count,
+                        "prediction": voted_label,
+                        "confidence": float(confidence),
+                        "rep_counts": rep_counts,
+                        "count_this": count_this
+                    })
+                    # הזזה של החלון – הזזת הפריים הראשון בלבד!
+                    frame_buffer.popleft()
+
+                await websocket.send_json({
+                    "type": "frame_processed",
+                    "frame_count": frame_count,
+                    "pose_detected": True
                 })
 
             except WebSocketDisconnect:
