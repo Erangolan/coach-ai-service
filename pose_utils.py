@@ -118,12 +118,188 @@ def speed_up(sequence, factor=2):
 def slow_down(sequence, factor=2):
     return np.repeat(sequence, factor, axis=0)
 
-def apply_all_augmentations(sequence, debug_path=None):
+def random_crop(sequence, min_ratio=0.7, max_ratio=1.0):
+    """
+    Randomly crop a sequence to a length between min_ratio and max_ratio of the original length.
+    This helps with temporal robustness by simulating different video lengths.
+    """
+    if len(sequence) < 5:  # Don't crop very short sequences
+        return sequence
+    
+    # Calculate crop length
+    min_length = max(3, int(len(sequence) * min_ratio))
+    max_length = min(len(sequence), int(len(sequence) * max_ratio))
+    
+    if min_length >= max_length:
+        return sequence
+    
+    crop_length = np.random.randint(min_length, max_length + 1)
+    
+    # Randomly choose start position
+    max_start = len(sequence) - crop_length
+    start_pos = np.random.randint(0, max_start + 1)
+    
+    return sequence[start_pos:start_pos + crop_length]
+
+def frame_dropout(sequence, dropout_prob=0.1, max_consecutive_drops=2):
+    """
+    Randomly drop frames from a sequence to simulate missing or occluded frames.
+    This helps the model become robust to frame losses in real-world scenarios.
+    
+    Args:
+        sequence: Input sequence of frames
+        dropout_prob: Probability of dropping each frame
+        max_consecutive_drops: Maximum number of consecutive frames that can be dropped
+    """
+    if len(sequence) < 5:  # Don't drop frames from very short sequences
+        return sequence
+    
+    # Create a mask for which frames to keep
+    keep_mask = np.ones(len(sequence), dtype=bool)
+    
+    # Apply dropout with consecutive frame constraint
+    consecutive_drops = 0
+    for i in range(len(sequence)):
+        if np.random.random() < dropout_prob and consecutive_drops < max_consecutive_drops:
+            keep_mask[i] = False
+            consecutive_drops += 1
+        else:
+            consecutive_drops = 0
+    
+    # Ensure we keep at least 3 frames
+    if np.sum(keep_mask) < 3:
+        # If too many frames were dropped, keep at least 3 frames
+        keep_indices = np.random.choice(len(sequence), min(3, len(sequence)), replace=False)
+        keep_mask = np.zeros(len(sequence), dtype=bool)
+        keep_mask[keep_indices] = True
+    
+    return sequence[keep_mask]
+
+def time_shift(sequence, max_frames=3):
+    """
+    Apply a small random time shift by starting the sequence a few frames earlier or later.
+    This simulates slight temporal misalignments in video start times.
+    
+    Args:
+        sequence: Input sequence of frames
+        max_frames: Maximum number of frames to shift (default: 3)
+    """
+    if len(sequence) < max_frames + 3:  # Need at least max_frames + 3 to shift
+        return sequence
+    
+    # Generate a random shift (can be negative or positive)
+    shift = np.random.randint(-max_frames, max_frames + 1)
+    
+    if shift == 0:  # No shift
+        return sequence
+    
+    # Apply the shift
+    if shift > 0:
+        # Start later (skip first few frames)
+        shifted_sequence = sequence[shift:]
+    else:
+        # Start earlier (add padding at the beginning)
+        # Repeat the first frame for the missing frames
+        padding = np.tile(sequence[0], (abs(shift), 1))
+        shifted_sequence = np.vstack([padding, sequence])
+    
+    return shifted_sequence
+
+def add_velocity_features(sequence):
+    """
+    Add velocity and acceleration features to a sequence.
+    Args:
+        sequence: numpy array of shape (frames, features)
+    Returns:
+        numpy array of shape (frames, features * 3)
+    """
+    num_frames, num_features = sequence.shape
+
+    # Velocity: difference between consecutive frames, pad first row
+    if num_frames < 2:
+        velocity_features = np.zeros_like(sequence)
+    else:
+        velocity = np.diff(sequence, axis=0)
+        velocity_features = np.vstack([velocity[0], velocity])
+
+    # Acceleration: difference between consecutive velocities, pad first two rows
+    if num_frames < 3:
+        acceleration_features = np.zeros_like(sequence)
+    else:
+        # Calculate acceleration from the original velocity calculation
+        velocity_for_accel = np.diff(sequence, axis=0)
+        acceleration = np.diff(velocity_for_accel, axis=0)
+        # Pad first two frames with the first acceleration value
+        acceleration_features = np.vstack([acceleration[0:1], acceleration[0:1], acceleration])
+
+    enhanced_sequence = np.hstack([sequence, velocity_features, acceleration_features])
+    return enhanced_sequence
+
+def add_statistical_features(sequence):
+    """
+    Add statistical features (mean, median, std, max, min) for each angle across the sequence.
+    Args:
+        sequence: numpy array of shape (frames, features)
+    Returns:
+        numpy array with statistical features appended to each frame
+    """
+    num_frames, num_features = sequence.shape
+    
+    if num_frames < 2:
+        # Single frame - use the frame values as statistics
+        if num_frames == 1:
+            frame_values = sequence[0]
+            stats_features = np.tile(
+                np.hstack([frame_values, frame_values, np.zeros_like(frame_values), frame_values, frame_values]),
+                (num_frames, 1)
+            )
+        else:
+            # No frames - return zeros
+            stats_features = np.zeros((num_frames, num_features * 5))
+        return np.hstack([sequence, stats_features])
+    
+    # Calculate statistics for each feature across all frames
+    mean_features = np.mean(sequence, axis=0)
+    median_features = np.median(sequence, axis=0)
+    std_features = np.std(sequence, axis=0)
+    max_features = np.max(sequence, axis=0)
+    min_features = np.min(sequence, axis=0)
+    
+    # Create statistical features for each frame (same values for all frames)
+    stats_features = np.tile(
+        np.hstack([mean_features, median_features, std_features, max_features, min_features]),
+        (num_frames, 1)
+    )
+    
+    enhanced_sequence = np.hstack([sequence, stats_features])
+    return enhanced_sequence
+
+
+def apply_all_augmentations(sequence, debug_path=None, is_idle=False):
     aug_sequences = [sequence]  # original
     aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))
-    if len(sequence) > 3:
-        aug_sequences.append(speed_up(sequence, factor=2))
-    aug_sequences.append(slow_down(sequence, factor=2))
+    
+    # Add time shifting augmentation
+    aug_sequences.append(time_shift(sequence, max_frames=3))
+    
+    # Don't apply speed_up/slow_down for idle sequences
+    if not is_idle:
+        if len(sequence) > 3:
+            aug_sequences.append(speed_up(sequence, factor=2))
+        aug_sequences.append(slow_down(sequence, factor=2))
+    
+    # Add random cropping augmentations
+    if len(sequence) > 5:
+        # Add 2 different random crops
+        aug_sequences.append(random_crop(sequence, min_ratio=0.7, max_ratio=0.9))
+        aug_sequences.append(random_crop(sequence, min_ratio=0.8, max_ratio=1.0))
+    
+    # Add frame dropout augmentations
+    if len(sequence) > 5:
+        # Add 2 different frame dropout variations
+        aug_sequences.append(frame_dropout(sequence, dropout_prob=0.1, max_consecutive_drops=2))
+        aug_sequences.append(frame_dropout(sequence, dropout_prob=0.15, max_consecutive_drops=1))
+    
     if debug_path:
         print(f"{debug_path}: generated {len(aug_sequences)} augmented samples (orig len: {len(sequence)})")
     return [seq for seq in aug_sequences if len(seq) > 0]
@@ -212,7 +388,7 @@ def extract_keypoints_xyz(landmarks):
         coords.extend([pt.x, pt.y, pt.z])
     return coords
 
-def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False):
+def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False):
     cap = cv2.VideoCapture(video_path)
     sequence = []
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
@@ -231,7 +407,18 @@ def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=Fa
                     features = features + coords
                 sequence.append(features)
     cap.release()
-    return np.array(sequence)
+    
+    sequence = np.array(sequence)
+    
+    # Add velocity features if requested
+    if use_velocity and len(sequence) > 1:
+        sequence = add_velocity_features(sequence)
+    
+    # Add statistical features if requested
+    if use_statistics and len(sequence) > 1:
+        sequence = add_statistical_features(sequence)
+    
+    return sequence
 
 class LSTM_Transformer_Classifier(nn.Module):
     def __init__(self, input_size=40, hidden_size=256, num_layers=3, num_classes=2, 

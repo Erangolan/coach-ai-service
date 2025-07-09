@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from typing import List
-from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts
+from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features
 
 DATABASE_URL = "postgresql://erangolan:eran1234@localhost:5432/exercise_db"
 engine = create_engine(DATABASE_URL)
@@ -253,7 +253,18 @@ def classify_video(file: UploadFile = File(...), exercise_name: str = Form(...))
         raise HTTPException(status_code=400, detail="No valid pose detected")
 
     # 3. חיזוי
-    model = load_model(exercise_name)
+    focus_parts = ['right_knee', 'torso']
+    use_keypoints = True
+    use_velocity = True
+    use_statistics = True  # Enable statistical features
+    focus_indices = get_angle_indices_by_parts(focus_parts)
+    input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+    if use_velocity:
+        input_size *= 3  # Triple the input size for velocity + acceleration features
+    if use_statistics:
+        input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+    
+    model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
     input_tensor = sequence.unsqueeze(0)  # [1, seq_len, 9]
     lengths = torch.tensor([sequence.shape[0]])
     output = model(input_tensor, lengths)
@@ -285,7 +296,18 @@ async def analyze_video(file: UploadFile = File(...), exercise_name: str = Form(
             raise HTTPException(status_code=400, detail="No valid poses detected in video")
         
         # Load model
-        model = load_model(exercise_name)
+        focus_parts = ['right_knee', 'torso']
+        use_keypoints = True
+        use_velocity = True
+        use_statistics = True  # Enable statistical features
+        focus_indices = get_angle_indices_by_parts(focus_parts)
+        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        if use_velocity:
+            input_size *= 3  # Triple the input size for velocity + acceleration features
+        if use_statistics:
+            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+        
+        model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
         
         # Prepare data for model
         sequence_tensor = torch.tensor([sequence], dtype=torch.float32)
@@ -330,11 +352,17 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
         # === בדיוק כמו באימון! ===
         focus_parts = ['right_knee', 'torso']
         use_keypoints = True
+        use_velocity = True
+        use_statistics = True  # Enable statistical features
         focus_indices = get_angle_indices_by_parts(focus_parts)
         input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        if use_velocity:
+            input_size *= 3  # Triple the input size for velocity + acceleration features
+        if use_statistics:
+            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
         
         # Extract sequence from video using the correct pipeline
-        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints)
+        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics)
         if sequence is None or len(sequence) == 0:
             raise HTTPException(status_code=400, detail="No valid pose detected in video.")
         
@@ -369,8 +397,14 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
     try:
         focus_parts = ['right_knee', 'torso']
         use_keypoints = True
+        use_velocity = True  # Enable velocity features
+        use_statistics = True  # Enable statistical features
         focus_indices = get_angle_indices_by_parts(focus_parts)
         input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        if use_velocity:
+            input_size *= 3  # Triple the input size for velocity + acceleration features
+        if use_statistics:
+            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
@@ -385,7 +419,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         )
 
         LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
-        BUFFER_SIZE = 10    # או 50 אם אתה מעדיף
+        BUFFER_SIZE = 5    # או 50 אם אתה מעדיף
 
         frame_buffer = []
         frame_count = 0
@@ -426,6 +460,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
 
                 if len(frame_buffer) == BUFFER_SIZE:
                     sequence = np.array(frame_buffer)
+                    if use_velocity and len(sequence) > 2:
+                        sequence = add_velocity_features(sequence)
                     sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
                     lengths = torch.tensor([BUFFER_SIZE])
                     with torch.no_grad():
@@ -486,8 +522,14 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
     try:
         focus_parts = ['right_knee', 'torso']
         use_keypoints = True
+        use_velocity = True  # Enable velocity features
+        use_statistics = True  # Enable statistical features
         focus_indices = get_angle_indices_by_parts(focus_parts)
         input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        if use_velocity:
+            input_size *= 3  # Triple the input size for velocity + acceleration features
+        if use_statistics:
+            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
@@ -547,6 +589,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
 
                 if len(frame_buffer) == BUFFER_SIZE:
                     sequence = np.array(frame_buffer)
+                    if use_velocity and len(sequence) > 2:
+                        sequence = add_velocity_features(sequence)
                     sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
                     lengths = torch.tensor([BUFFER_SIZE])
                     with torch.no_grad():
@@ -556,7 +600,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                     predicted_label = LABELS[predicted]
 
                     pred_window.append(predicted_label)
-                    # majority voting – או פשוט קח predicted_label אם אתה לא רוצה להחליק
+                    # majority voting – או פשוט קח predicted_label אם אתה לא רוצים להחליק
                     voted_label = max(set(pred_window), key=pred_window.count)
 
                     count_this = False
@@ -618,8 +662,11 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
     try:
         focus_parts = ['right_knee', 'torso']
         use_keypoints = True
+        use_velocity = True  # Enable velocity features
         focus_indices = get_angle_indices_by_parts(focus_parts)
         input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        if use_velocity:
+            input_size *= 3  # Triple the input size for velocity + acceleration features
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
@@ -678,6 +725,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
 
                 if len(frame_buffer) == BUFFER_SIZE:
                     sequence = np.array(frame_buffer)
+                    if use_velocity and len(sequence) > 2:
+                        sequence = add_velocity_features(sequence)
                     sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
                     lengths = torch.tensor([BUFFER_SIZE])
                     with torch.no_grad():

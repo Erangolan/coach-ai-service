@@ -89,18 +89,24 @@ def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_m
     print_both(f"Confusion matrix saved to {filename}")
 
 def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=8, learning_rate=0.001,
-                use_keypoints=False, augment=False, bidirectional=True, model_type='lstm'):
+                use_keypoints=False, use_velocity=False, use_statistics=False, augment=False, bidirectional=True, model_type='lstm'):
     print_both(f"Starting training for exercise: {exercise_name}")
     print_both(f"Data directory: {data_dir}")
     print_both(f"Model type: {model_type.upper()}")
 
     focus_indices = get_angle_indices_by_parts(focus_parts)
-    input_size = len(focus_indices) if focus_indices is not None else 40
+    base_features = len(focus_indices) if focus_indices is not None else 40
     if use_keypoints:
-        input_size += 12 * 3  # 12 keypoints * (x,y,z)
-    print_both(f"Using input_size={input_size} (focus_parts={focus_parts})")
+        base_features += 12 * 3  # 12 keypoints * (x,y,z)
+    if use_velocity:
+        base_features *= 3  # Triple the input size for velocity + acceleration features
+    input_size = base_features
+    if use_statistics:
+        input_size += base_features * 5  # Add 5 statistical features per feature (after velocity)
+    print_both(f"Using input_size={input_size} (focus_parts={focus_parts}, use_keypoints={use_keypoints}, use_velocity={use_velocity}, use_statistics={use_statistics})")
+    print_both(f"focus_indices length: {len(focus_indices) if focus_indices is not None else 40}")
 
-    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, print_both=print_both)
+    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, print_both=print_both)
     
     # Check if we have enough data
     if len(full_dataset) == 0:
@@ -133,20 +139,20 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Videos per class: {video_class_counts}")
     
     # Show some example filenames
-    print_both("Sample filenames:")
-    for i, (_, label, filename) in enumerate(full_dataset.samples[:5]):
-        print_both(f"  {i}: {filename} -> label {label}")
+    # print_both("Sample filenames:")
+    # for i, (_, label, filename) in enumerate(full_dataset.samples[:5]):
+    #     print_both(f"  {i}: {filename} -> label {label}")
     
     # Split by video (not by sample)
     all_videos = list(set(video_to_label.keys()))
-    print_both(f"All videos: {all_videos}")
+    # print_both(f"All videos: {all_videos}")
     
     # Check if we have enough samples for stratified splitting
     labels_for_videos = [video_to_label[v] for v in all_videos]
     label_counts = Counter(labels_for_videos)
     min_samples_per_class = min(label_counts.values())
     
-    print_both(f"Labels for videos: {labels_for_videos}")
+    # print_both(f"Labels for videos: {labels_for_videos}")
     print_both(f"Label counts: {label_counts}")
     print_both(f"Min samples per class: {min_samples_per_class}")
     
@@ -273,6 +279,8 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--use_keypoints', action='store_true', help='Include xyz keypoints as features')
+    parser.add_argument('--use_velocity', action='store_true', help='Add velocity features (change between consecutive frames)')
+    parser.add_argument('--use_statistics', action='store_true', help='Add statistical features (mean, median, std, max, min)')
     parser.add_argument('--augment', action='store_true', help='Apply data augmentation')
     parser.add_argument('--no_bidirectional', action='store_true', help='Disable BiLSTM')
     parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'cnn_lstm', 'lstm_transformer'], help='Which model to use')
@@ -282,6 +290,8 @@ if __name__ == "__main__":
         train_model(
             args.data_dir, args.exercise, args.focus, args.epochs, args.batch_size, args.lr,
             use_keypoints=args.use_keypoints,
+            use_velocity=args.use_velocity,
+            use_statistics=args.use_statistics,
             augment=args.augment,
             bidirectional=not args.no_bidirectional,
             model_type=args.model_type,

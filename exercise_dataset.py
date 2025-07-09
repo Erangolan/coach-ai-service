@@ -18,12 +18,14 @@ LABELS_MAP = {
 LABELS = list(LABELS_MAP.keys())
 
 class ExerciseDataset(Dataset):
-    def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, print_both=None):
+    def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, use_velocity=False, use_statistics=False, print_both=None):
         self.data_dir = data_dir
         self.exercise_name = exercise_name
         self.transform = transform
         self.focus_indices = focus_indices
         self.use_keypoints = use_keypoints
+        self.use_velocity = use_velocity
+        self.use_statistics = use_statistics
         self.print_both = print_both
 
         self.samples = []
@@ -35,14 +37,16 @@ class ExerciseDataset(Dataset):
             for f in files:
                 video_path = os.path.join(label_dir, f)
                 label = LABELS_MAP[label_name]
-                sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints)
+                sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints, use_velocity=self.use_velocity, use_statistics=self.use_statistics)
                 if len(sequence) == 0:
                     if self.print_both:
                         self.print_both(f"EMPTY SEQUENCE: {video_path}")
                     else:
                         print(f"EMPTY SEQUENCE: {video_path}")
                     continue
-                aug_sequences = apply_all_augmentations(sequence, debug_path=video_path)
+                # Check if this is an idle sample
+                is_idle = (label_name == "idle")
+                aug_sequences = apply_all_augmentations(sequence, debug_path=video_path, is_idle=is_idle)
                 for aug_seq in aug_sequences:
                     if len(aug_seq) > 0:
                         self.samples.append((aug_seq, label, video_path))
