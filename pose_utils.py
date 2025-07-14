@@ -237,43 +237,105 @@ def add_velocity_features(sequence):
 
 def add_statistical_features(sequence):
     """
-    Add statistical features (mean, median, std, max, min) for each angle across the sequence.
+    Add statistical features (mean, median, std, max, min, range) for each feature across the sequence.
     Args:
         sequence: numpy array of shape (frames, features)
     Returns:
         numpy array with statistical features appended to each frame
     """
     num_frames, num_features = sequence.shape
-    
+    zero_values = np.zeros_like(sequence[0]) if num_frames > 0 else np.zeros(num_features)
+
     if num_frames < 2:
         # Single frame - use the frame values as statistics
         if num_frames == 1:
             frame_values = sequence[0]
             stats_features = np.tile(
-                np.hstack([frame_values, frame_values, np.zeros_like(frame_values), frame_values, frame_values]),
+                np.hstack([
+                    frame_values,    # mean
+                    frame_values,    # median
+                    zero_values,     # std
+                    frame_values,    # max
+                    frame_values,    # min
+                    zero_values      # range
+                ]),
                 (num_frames, 1)
             )
         else:
             # No frames - return zeros
-            stats_features = np.zeros((num_frames, num_features * 5))
+            stats_features = np.zeros((num_frames, num_features * 6))
         return np.hstack([sequence, stats_features])
-    
+
     # Calculate statistics for each feature across all frames
     mean_features = np.mean(sequence, axis=0)
     median_features = np.median(sequence, axis=0)
     std_features = np.std(sequence, axis=0)
     max_features = np.max(sequence, axis=0)
     min_features = np.min(sequence, axis=0)
-    
+    range_features = max_features - min_features
+
     # Create statistical features for each frame (same values for all frames)
     stats_features = np.tile(
-        np.hstack([mean_features, median_features, std_features, max_features, min_features]),
+        np.hstack([
+            mean_features,
+            median_features,
+            std_features,
+            max_features,
+            min_features,
+            range_features
+        ]),
         (num_frames, 1)
     )
-    
     enhanced_sequence = np.hstack([sequence, stats_features])
     return enhanced_sequence
 
+
+def add_ratio_features(sequence, focus_indices=None):
+    """
+    Add ratio features between relevant angles.
+    For right knee exercise, we calculate ratio between primary knee angle and primary torso angle.
+    
+    Args:
+        sequence: numpy array of shape (num_frames, num_features)
+        focus_indices: indices of focus angles (if None, assumes first 15 are angles)
+    
+    Returns:
+        numpy array with ratio features added
+    """
+    num_frames, num_features = sequence.shape
+    
+    if num_frames == 0:
+        return sequence
+    
+    # Determine which features are angles (not keypoints or other features)
+    if focus_indices is not None:
+        # Use focus_indices to identify angle features
+        angle_features = sequence[:, :len(focus_indices)]
+        other_features = sequence[:, len(focus_indices):]
+    else:
+        # Assume first 15 features are angles (for 15 focus angles)
+        angle_features = sequence[:, :15]
+        other_features = sequence[:, 15:]
+    
+    # For right knee exercise, we focus on the primary knee angle and primary torso angle
+    # Based on focus_parts=['right_knee', 'torso'], we have 15 angles
+    # Let's use the first angle from each group as the primary angles
+    
+    # Primary knee angle (first angle from right_knee group)
+    primary_knee_angle = angle_features[:, 0]  # First angle
+    
+    # Primary torso angle (first angle from torso group)
+    primary_torso_angle = angle_features[:, 8]  # 9th angle (first of torso group)
+    
+    # Calculate the ratio: knee / torso
+    # Avoid division by zero
+    ratio = primary_knee_angle / (primary_torso_angle + 1e-5)
+    
+    # Add the ratio as a single feature column
+    ratio_features = ratio.reshape(-1, 1)  # Reshape to (num_frames, 1)
+    
+    enhanced_sequence = np.hstack([sequence, ratio_features])
+    return enhanced_sequence
 
 def apply_all_augmentations(sequence, debug_path=None, is_idle=False):
     aug_sequences = [sequence]  # original
@@ -388,7 +450,7 @@ def extract_keypoints_xyz(landmarks):
         coords.extend([pt.x, pt.y, pt.z])
     return coords
 
-def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False):
+def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False):
     cap = cv2.VideoCapture(video_path)
     sequence = []
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
@@ -414,9 +476,13 @@ def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=Fa
     if use_velocity and len(sequence) > 1:
         sequence = add_velocity_features(sequence)
     
-    # Add statistical features if requested
+    # Add statistical features if requested (now includes range features)
     if use_statistics and len(sequence) > 1:
         sequence = add_statistical_features(sequence)
+    
+    # Add ratio features if requested
+    if use_ratios and len(sequence) > 1:
+        sequence = add_ratio_features(sequence, focus_indices)
     
     return sequence
 

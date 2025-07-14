@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from datetime import datetime
 
 # Create logs directory if it doesn't exist
@@ -35,9 +36,10 @@ from collections import Counter
 
 LABELS_MAP = {
     "good": 0,
-    "bad-knee-angle": 1,
+    "bad-left-angle": 1,
     "bad-lower-knee": 2,
-    "idle": 3,
+    "bad-right-angle": 3,
+    "idle": 4,
 }
 LABELS = list(LABELS_MAP.keys())
 label_to_idx = LABELS_MAP
@@ -89,7 +91,7 @@ def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_m
     print_both(f"Confusion matrix saved to {filename}")
 
 def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=8, learning_rate=0.001,
-                use_keypoints=False, use_velocity=False, use_statistics=False, augment=False, bidirectional=True, model_type='lstm'):
+                use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, augment=False, bidirectional=True, model_type='lstm'):
     print_both(f"Starting training for exercise: {exercise_name}")
     print_both(f"Data directory: {data_dir}")
     print_both(f"Model type: {model_type.upper()}")
@@ -102,11 +104,16 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         base_features *= 3  # Triple the input size for velocity + acceleration features
     input_size = base_features
     if use_statistics:
-        input_size += base_features * 5  # Add 5 statistical features per feature (after velocity)
-    print_both(f"Using input_size={input_size} (focus_parts={focus_parts}, use_keypoints={use_keypoints}, use_velocity={use_velocity}, use_statistics={use_statistics})")
+        input_size += base_features * 6  # Add 6 statistical features per feature (mean, median, std, max, min, range)
+    if use_ratios:
+        # Add 1 ratio feature: primary knee angle / primary torso angle
+        input_size += 1
+        print_both(f"Ratio features: 1 (primary knee / primary torso)")
+    
+    print_both(f"Using input_size={input_size} (focus_parts={focus_parts}, use_keypoints={use_keypoints}, use_velocity={use_velocity}, use_statistics={use_statistics}, use_ratios={use_ratios})")
     print_both(f"focus_indices length: {len(focus_indices) if focus_indices is not None else 40}")
 
-    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, print_both=print_both)
+    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, print_both=print_both)
     
     # Check if we have enough data
     if len(full_dataset) == 0:
@@ -200,7 +207,7 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     # Count class samples for weights
     labels = [label for _, label, _ in full_dataset.samples]
     label_counts = Counter(labels)
-    num_classes = 4  # עדכן ל-4 קטגוריות (good, bad-knee-angle, bad-lower-knee, idle)
+    num_classes = 5  # עדכן ל-5 קטגוריות (good, bad-left-angle, bad-lower-knee, bad-right-angle, idle)
     class_weights = [0] * num_classes
     total = sum(label_counts.values())
     for i in range(num_classes):
@@ -210,17 +217,18 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
 
     # Choose model
     if model_type == 'cnn_lstm':
-        model = CNN_LSTM_Classifier(input_size=input_size, num_classes=4, bidirectional=bidirectional)
+        model = CNN_LSTM_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     elif model_type == 'lstm_transformer':
-        model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=4, bidirectional=bidirectional)
+        model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     else:
-        model = LSTMClassifier(input_size=input_size, num_classes=4, bidirectional=bidirectional)
+        model = LSTMClassifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     model.to(device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     for epoch in range(num_epochs):
+        epoch_start_time = time.time()
         model.train()
         total_loss = 0
         correct = 0
@@ -258,7 +266,9 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
                 val_total += labels.size(0)
                 val_correct += (predicted == labels).sum().item()
         val_acc = 100 * val_correct / val_total if val_total > 0 else 0
+        epoch_time = time.time() - epoch_start_time
         print_both(f'Validation Accuracy: {val_acc:.2f}%')
+        print_both(f'Epoch {epoch+1} completed in {epoch_time:.2f} seconds ({epoch_time/60:.2f} minutes)')
 
     # Save model and check test set
     os.makedirs("models", exist_ok=True)
@@ -280,7 +290,9 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--use_keypoints', action='store_true', help='Include xyz keypoints as features')
     parser.add_argument('--use_velocity', action='store_true', help='Add velocity features (change between consecutive frames)')
-    parser.add_argument('--use_statistics', action='store_true', help='Add statistical features (mean, median, std, max, min)')
+    parser.add_argument('--use_statistics', action='store_true', help='Add statistical features (mean, median, std, max, min, range)')
+    parser.add_argument('--use_ratios', action='store_true', help='Add ratio features between relevant angles')
+
     parser.add_argument('--augment', action='store_true', help='Apply data augmentation')
     parser.add_argument('--no_bidirectional', action='store_true', help='Disable BiLSTM')
     parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'cnn_lstm', 'lstm_transformer'], help='Which model to use')
@@ -292,6 +304,7 @@ if __name__ == "__main__":
             use_keypoints=args.use_keypoints,
             use_velocity=args.use_velocity,
             use_statistics=args.use_statistics,
+            use_ratios=args.use_ratios,
             augment=args.augment,
             bidirectional=not args.no_bidirectional,
             model_type=args.model_type,

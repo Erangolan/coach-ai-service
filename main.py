@@ -48,9 +48,10 @@ mp_drawing = mp.solutions.drawing_utils
 # Important: Same label mapping as in training
 LABELS_MAP = {
     "good": 0,
-    "bad-knee-angle": 1,
+    "bad-left-angle": 1,
     "bad-lower-knee": 2,
-    "idle": 3,
+    "bad-right-angle": 3,
+    "idle": 4,
 }
 LABELS = list(LABELS_MAP.keys())
 label_to_idx = LABELS_MAP
@@ -262,7 +263,7 @@ def classify_video(file: UploadFile = File(...), exercise_name: str = Form(...))
     if use_velocity:
         input_size *= 3  # Triple the input size for velocity + acceleration features
     if use_statistics:
-        input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+        input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
     
     model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
     input_tensor = sequence.unsqueeze(0)  # [1, seq_len, 9]
@@ -305,7 +306,7 @@ async def analyze_video(file: UploadFile = File(...), exercise_name: str = Form(
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
         
         model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
         
@@ -359,10 +360,10 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
         
         # Extract sequence from video using the correct pipeline
-        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics)
+        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=False)
         if sequence is None or len(sequence) == 0:
             raise HTTPException(status_code=400, detail="No valid pose detected in video.")
         
@@ -404,7 +405,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
@@ -418,8 +419,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
             min_tracking_confidence=0.5
         )
 
-        LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
-        BUFFER_SIZE = 5    # או 50 אם אתה מעדיף
+        LABELS = ["good", "bad-left-angle", "bad-lower-knee", "bad-right-angle", "idle"]
+        BUFFER_SIZE = 12    # או 50 אם אתה מעדיף
 
         frame_buffer = []
         frame_count = 0
@@ -529,11 +530,11 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 5  # Add 5 statistical features per original feature
+            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
-            input_size=input_size, num_classes=4, bidirectional=True
+            input_size=input_size, num_classes=5, bidirectional=True
         )
         model.eval()
 
@@ -543,7 +544,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
             min_tracking_confidence=0.5
         )
 
-        LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
+        LABELS = ["good", "bad-left-angle", "bad-lower-knee", "bad-right-angle", "idle"]
         BUFFER_SIZE = 40
         VOTING_WINDOW = 8  # הצבעות – אפשר גם 1 (בלי majority)
 
@@ -670,7 +671,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
-            input_size=input_size, num_classes=4, bidirectional=True
+            input_size=input_size, num_classes=5, bidirectional=True
         )
         model.eval()
 

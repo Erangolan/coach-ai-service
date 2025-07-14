@@ -11,14 +11,15 @@ from sklearn.metrics import ConfusionMatrixDisplay
 
 LABELS_MAP = {
     "good": 0,
-    "bad-knee-angle": 1,
+    "bad-left-angle": 1,
     "bad-lower-knee": 2,
-    "idle": 3,
+    "bad-right-angle": 3,
+    "idle": 4,
 }
 LABELS = list(LABELS_MAP.keys())
 
 class ExerciseDataset(Dataset):
-    def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, use_velocity=False, use_statistics=False, print_both=None):
+    def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, print_both=None):
         self.data_dir = data_dir
         self.exercise_name = exercise_name
         self.transform = transform
@@ -26,6 +27,7 @@ class ExerciseDataset(Dataset):
         self.use_keypoints = use_keypoints
         self.use_velocity = use_velocity
         self.use_statistics = use_statistics
+        self.use_ratios = use_ratios
         self.print_both = print_both
 
         self.samples = []
@@ -33,11 +35,11 @@ class ExerciseDataset(Dataset):
             label_dir = os.path.join(data_dir, exercise_name, label_name)
             if not os.path.exists(label_dir):
                 continue
-            files = sorted([f for f in os.listdir(label_dir) if f.endswith('.mp4')])
+            files = sorted([f for f in os.listdir(label_dir) if f.endswith('.mp4') or f.endswith('.mov')])
             for f in files:
                 video_path = os.path.join(label_dir, f)
                 label = LABELS_MAP[label_name]
-                sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints, use_velocity=self.use_velocity, use_statistics=self.use_statistics)
+                sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints, use_velocity=self.use_velocity, use_statistics=self.use_statistics, use_ratios=self.use_ratios)
                 if len(sequence) == 0:
                     if self.print_both:
                         self.print_both(f"EMPTY SEQUENCE: {video_path}")
