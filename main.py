@@ -18,6 +18,7 @@ import numpy as np
 import base64
 import io
 from typing import List, Dict, Any
+from collections import deque
 
 import torch
 import torch.nn as nn
@@ -56,7 +57,7 @@ LABELS_MAP = {
 LABELS = list(LABELS_MAP.keys())
 label_to_idx = LABELS_MAP
 
-def load_model(exercise_name, model_type='lstm', input_size=40, num_classes=4, bidirectional=True):
+def load_model(exercise_name, model_type='cnn_lstm', input_size=40, num_classes=5, bidirectional=True):
     model_path = f"models/{exercise_name}_model.pt"
     if not os.path.exists(model_path):
         raise ValueError(f"Model not found: {model_path}")
@@ -254,18 +255,22 @@ def classify_video(file: UploadFile = File(...), exercise_name: str = Form(...))
         raise HTTPException(status_code=400, detail="No valid pose detected")
 
     # 3. חיזוי
-    focus_parts = ['right_knee', 'torso']
+    focus_parts = ['right_knee', 'right_shoulder', 'torso']
     use_keypoints = True
     use_velocity = True
-    use_statistics = True  # Enable statistical features
+    use_statistics = True
+    use_ratios = True
     focus_indices = get_angle_indices_by_parts(focus_parts)
-    input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+    base_features = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+    input_size = base_features
     if use_velocity:
-        input_size *= 3  # Triple the input size for velocity + acceleration features
+        input_size *= 3
     if use_statistics:
-        input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+        input_size += input_size * 6
+    if use_ratios:
+        input_size += 1
     
-    model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
+    model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=5, bidirectional=True)
     input_tensor = sequence.unsqueeze(0)  # [1, seq_len, 9]
     lengths = torch.tensor([sequence.shape[0]])
     output = model(input_tensor, lengths)
@@ -297,18 +302,22 @@ async def analyze_video(file: UploadFile = File(...), exercise_name: str = Form(
             raise HTTPException(status_code=400, detail="No valid poses detected in video")
         
         # Load model
-        focus_parts = ['right_knee', 'torso']
+        focus_parts = ['right_knee', 'right_shoulder', 'torso']
         use_keypoints = True
         use_velocity = True
         use_statistics = True  # Enable statistical features
+        use_ratios = True
         focus_indices = get_angle_indices_by_parts(focus_parts)
-        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        base_features = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        input_size = base_features
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+            input_size += input_size * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+        if use_ratios:
+            input_size += 1
         
-        model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
+        model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=5, bidirectional=True)
         
         # Prepare data for model
         sequence_tensor = torch.tensor([sequence], dtype=torch.float32)
@@ -351,19 +360,23 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
 
     try:
         # === בדיוק כמו באימון! ===
-        focus_parts = ['right_knee', 'torso']
+        focus_parts = ['right_knee', 'right_shoulder', 'torso']
         use_keypoints = True
         use_velocity = True
         use_statistics = True  # Enable statistical features
+        use_ratios = True
         focus_indices = get_angle_indices_by_parts(focus_parts)
-        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        base_features = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        input_size = base_features
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+            input_size += input_size * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+        if use_ratios:
+            input_size += 1
         
         # Extract sequence from video using the correct pipeline
-        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=False)
+        sequence = extract_sequence_from_video(video_path, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios)
         if sequence is None or len(sequence) == 0:
             raise HTTPException(status_code=400, detail="No valid pose detected in video.")
         
@@ -371,7 +384,7 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
 
         # Load model for the given exercise
         try:
-            model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=4, bidirectional=True)
+            model = load_model(exercise_name, model_type='cnn_lstm', input_size=input_size, num_classes=5, bidirectional=True)
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Model for exercise '{exercise_name}' not found: {str(e)}")
 
@@ -396,141 +409,31 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
     holistic = None
 
     try:
-        focus_parts = ['right_knee', 'torso']
+        focus_parts = ['right_knee', 'right_shoulder', 'torso']
         use_keypoints = True
         use_velocity = True  # Enable velocity features
         use_statistics = True  # Enable statistical features
+        use_ratios = True
         focus_indices = get_angle_indices_by_parts(focus_parts)
-        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        base_features = len(focus_indices) + (12 * 3 if use_keypoints else 0)
+        input_size = base_features
         if use_velocity:
             input_size *= 3  # Triple the input size for velocity + acceleration features
         if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+            input_size += input_size * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+        if use_ratios:
+            input_size += 1
 
-        model = load_model(
-            exercise_name, model_type='cnn_lstm',
-            input_size=input_size, num_classes=4, bidirectional=True
-        )
-        model.eval()
-
-        mp_holistic = mp.solutions.holistic
-        holistic = mp_holistic.Holistic(
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-
-        LABELS = ["good", "bad-left-angle", "bad-lower-knee", "bad-right-angle", "idle"]
-        BUFFER_SIZE = 12    # או 50 אם אתה מעדיף
-
-        frame_buffer = []
-        frame_count = 0
-        rep_counts = {label: 0 for label in LABELS}
-
-        await websocket.send_json({
-            "type": "status",
-            "message": f"Ready to analyze {exercise_name} exercise (base64)",
-            "model_loaded": True
-        })
-
-        while True:
-            try:
-                data = await websocket.receive_text()
-                if data.startswith('data:image/'):
-                    data = data.split(',')[1]
-                binary_data = base64.b64decode(data)
-                nparr = np.frombuffer(binary_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-                if frame is None:
-                    continue
-
-                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                image.flags.writeable = False
-                results = holistic.process(image)
-
-                if not results.pose_landmarks:
-                    continue
-
-                angles = extract_angles(results.pose_landmarks)
-                features = [angles[i] for i in focus_indices] if focus_indices else angles
-                if use_keypoints:
-                    keypoints = extract_keypoints_xyz(results.pose_landmarks)
-                    features += keypoints
-                frame_buffer.append(features)
-                frame_count += 1
-
-                if len(frame_buffer) == BUFFER_SIZE:
-                    sequence = np.array(frame_buffer)
-                    if use_velocity and len(sequence) > 2:
-                        sequence = add_velocity_features(sequence)
-                    sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
-                    lengths = torch.tensor([BUFFER_SIZE])
-                    with torch.no_grad():
-                        output = model(sequence_tensor, lengths)
-                        predicted = torch.argmax(output, dim=1).item()
-                        confidence = torch.softmax(output, dim=1)[0][predicted].item()
-                    predicted_label = LABELS[predicted]
-                    rep_counts[predicted_label] += 1
-
-                    await websocket.send_json({
-                        "type": "prediction",
-                        "frame_count": frame_count,
-                        "prediction": predicted_label,
-                        "confidence": float(confidence),
-                        "rep_counts": rep_counts
-                    })
-                    frame_buffer = []  # מתחילים מחדש
-
-                await websocket.send_json({
-                    "type": "frame_processed",
-                    "frame_count": frame_count,
-                    "pose_detected": True
-                })
-
-            except WebSocketDisconnect:
-                print("[DEBUG] WebSocket disconnected")
-                break
-            except Exception as e:
-                print(f"[ERROR] Exception in frame processing: {e}")
-                try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": f"Error processing frame: {str(e)}"
-                    })
-                except:
-                    break
-
-    except Exception as e:
-        print(f"[ERROR] WebSocket error: {e}")
-        try:
-            await websocket.send_json({
-                "type": "error",
-                "message": f"WebSocket error: {str(e)}"
-            })
-        except:
-            pass
-    finally:
-        if holistic is not None:
-            holistic.close()
-        print("[DEBUG] MediaPipe holistic closed.")
-
-
-@app.websocket("/ws/video-analysis-base64/{exercise_name}")
-async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: str):
-    await websocket.accept()
-    holistic = None
-
-    try:
-        focus_parts = ['right_knee', 'torso']
-        use_keypoints = True
-        use_velocity = True  # Enable velocity features
-        use_statistics = True  # Enable statistical features
-        focus_indices = get_angle_indices_by_parts(focus_parts)
-        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
-        if use_velocity:
-            input_size *= 3  # Triple the input size for velocity + acceleration features
-        if use_statistics:
-            input_size += input_size // (3 if use_velocity else 1) * 6  # Add 6 statistical features per original feature (mean, median, std, max, min, range)
+        # Debug prints
+        print(f"[DEBUG] focus_parts: {focus_parts}")
+        print(f"[DEBUG] focus_indices length: {len(focus_indices)}")
+        print(f"[DEBUG] Base features (angles + keypoints): {base_features}")
+        print(f"[DEBUG] After velocity: {input_size if not use_velocity else 'N/A'}")
+        print(f"[DEBUG] After statistics: {input_size if not use_statistics else 'N/A'}")
+        print(f"[DEBUG] After ratios: {input_size if not use_ratios else 'N/A'}")
+        print(f"[DEBUG] Final input_size: {input_size}")
+        print(f"[DEBUG] Expected input_size: 1177")
+        print(f"[DEBUG] Match: {input_size == 1177}")
 
         model = load_model(
             exercise_name, model_type='cnn_lstm',
@@ -545,20 +448,32 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         )
 
         LABELS = ["good", "bad-left-angle", "bad-lower-knee", "bad-right-angle", "idle"]
-        BUFFER_SIZE = 40
-        VOTING_WINDOW = 8  # הצבעות – אפשר גם 1 (בלי majority)
+        BUFFER_SIZE = 40  # 1 second at 40 FPS
+        ANALYSIS_INTERVAL = 0.2  # seconds
+        VOTING_WINDOW_SIZE = 5  # Number of recent predictions to consider
+        MIN_CONFIDENCE_THRESHOLD = 0.7  # Minimum confidence for counting
+        MIN_TIME_BETWEEN_REPS = 0.5  # seconds between rep counting
+        MIN_AGREEMENT = 3  # At least 3 out of 5 predictions must agree
 
         frame_buffer = deque(maxlen=BUFFER_SIZE)
-        pred_window = deque(maxlen=VOTING_WINDOW)
+        prediction_history = deque(maxlen=VOTING_WINDOW_SIZE)
         rep_counts = {label: 0 for label in LABELS}
         frame_count = 0
-        last_predicted_label = "idle"
-        last_rep_frame = 0
+        last_analysis_time = 0.0
+        last_rep_time = 0.0
+        current_time = 0.0
 
         await websocket.send_json({
             "type": "status",
             "message": f"Ready to analyze {exercise_name} exercise (base64)",
-            "model_loaded": True
+            "model_loaded": True,
+            "analysis_params": {
+                "analysis_interval": ANALYSIS_INTERVAL,
+                "voting_window_size": VOTING_WINDOW_SIZE,
+                "min_confidence_threshold": MIN_CONFIDENCE_THRESHOLD,
+                "min_time_between_reps": MIN_TIME_BETWEEN_REPS,
+                "min_agreement": MIN_AGREEMENT
+            }
         })
 
         while True:
@@ -587,11 +502,23 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                     features += keypoints
                 frame_buffer.append(features)
                 frame_count += 1
+                current_time = frame_count / 40.0  # Assuming 40 FPS
 
-                if len(frame_buffer) == BUFFER_SIZE:
+                # Analyze every 0.2 seconds (every 8 frames at 40 FPS)
+                if (len(frame_buffer) == BUFFER_SIZE and 
+                    current_time - last_analysis_time >= ANALYSIS_INTERVAL):
+                    
                     sequence = np.array(frame_buffer)
+                    # Apply the same preprocessing as in training
                     if use_velocity and len(sequence) > 2:
                         sequence = add_velocity_features(sequence)
+                    if use_statistics and len(sequence) > 1:
+                        from pose_utils import add_statistical_features
+                        sequence = add_statistical_features(sequence)
+                    if use_ratios and len(sequence) > 1:
+                        from pose_utils import add_ratio_features
+                        sequence = add_ratio_features(sequence, focus_indices)
+                    
                     sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
                     lengths = torch.tensor([BUFFER_SIZE])
                     with torch.no_grad():
@@ -600,164 +527,68 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                         confidence = torch.softmax(output, dim=1)[0][predicted].item()
                     predicted_label = LABELS[predicted]
 
-                    pred_window.append(predicted_label)
-                    # majority voting – או פשוט קח predicted_label אם אתה לא רוצים להחליק
-                    voted_label = max(set(pred_window), key=pred_window.count)
+                    # Add prediction to history
+                    prediction_history.append({
+                        'label': predicted_label,
+                        'confidence': confidence,
+                        'timestamp': current_time
+                    })
 
+                    # Check for agreement in recent predictions
                     count_this = False
-                    # נחשב חזרה רק כשיש מעבר מ-idle/קטגוריה אחרת
-                    if (voted_label != last_predicted_label 
-                        and voted_label != "idle" 
-                        and frame_count - last_rep_frame > BUFFER_SIZE // 2):
-                        rep_counts[voted_label] += 1
-                        count_this = True
-                        last_predicted_label = voted_label
-                        last_rep_frame = frame_count
+                    final_prediction = "idle"
+                    final_confidence = 0.0
+
+                    if len(prediction_history) >= MIN_AGREEMENT:
+                        # Count occurrences of each label in recent predictions
+                        label_counts = {}
+                        high_confidence_predictions = []
+                        
+                        for pred in prediction_history:
+                            label = pred['label']
+                            conf = pred['confidence']
+                            label_counts[label] = label_counts.get(label, 0) + 1
+                            
+                            if conf >= MIN_CONFIDENCE_THRESHOLD:
+                                high_confidence_predictions.append(pred)
+                        
+                        # Find the most common label with high confidence
+                        if high_confidence_predictions:
+                            best_label = max(high_confidence_predictions, 
+                                           key=lambda x: (label_counts[x['label']], x['confidence']))
+                            
+                            # Check if we have enough agreement
+                            if label_counts[best_label['label']] >= MIN_AGREEMENT:
+                                final_prediction = best_label['label']
+                                final_confidence = best_label['confidence']
+                                
+                                # Count repetition if it's not idle and enough time has passed
+                                if (final_prediction != "idle" and 
+                                    current_time - last_rep_time >= MIN_TIME_BETWEEN_REPS):
+                                    rep_counts[final_prediction] += 1
+                                    count_this = True
+                                    last_rep_time = current_time
+
+                    last_analysis_time = current_time
+
+                    # Clean old predictions (older than 2 seconds)
+                    current_predictions = []
+                    for pred in prediction_history:
+                        if current_time - pred['timestamp'] <= 2.0:
+                            current_predictions.append(pred)
+                    prediction_history = deque(current_predictions, maxlen=VOTING_WINDOW_SIZE)
 
                     await websocket.send_json({
                         "type": "prediction",
                         "frame_count": frame_count,
-                        "prediction": voted_label,
-                        "confidence": float(confidence),
+                        "current_time": current_time,
+                        "prediction": final_prediction,
+                        "confidence": float(final_confidence),
                         "rep_counts": rep_counts,
-                        "count_this": count_this
+                        "count_this": count_this,
+                        "prediction_history_size": len(prediction_history),
+                        "high_confidence_count": len([p for p in prediction_history if p['confidence'] >= MIN_CONFIDENCE_THRESHOLD])
                     })
-
-                await websocket.send_json({
-                    "type": "frame_processed",
-                    "frame_count": frame_count,
-                    "pose_detected": True
-                })
-
-            except WebSocketDisconnect:
-                print("[DEBUG] WebSocket disconnected")
-                break
-            except Exception as e:
-                print(f"[ERROR] Exception in frame processing: {e}")
-                try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": f"Error processing frame: {str(e)}"
-                    })
-                except:
-                    break
-
-    except Exception as e:
-        print(f"[ERROR] WebSocket error: {e}")
-        try:
-            await websocket.send_json({
-                "type": "error",
-                "message": f"WebSocket error: {str(e)}"
-            })
-        except:
-            pass
-    finally:
-        if holistic is not None:
-            holistic.close()
-        print("[DEBUG] MediaPipe holistic closed.")
-
-    import collections
-    await websocket.accept()
-    holistic = None
-
-    try:
-        focus_parts = ['right_knee', 'torso']
-        use_keypoints = True
-        use_velocity = True  # Enable velocity features
-        focus_indices = get_angle_indices_by_parts(focus_parts)
-        input_size = len(focus_indices) + (12 * 3 if use_keypoints else 0)
-        if use_velocity:
-            input_size *= 3  # Triple the input size for velocity + acceleration features
-
-        model = load_model(
-            exercise_name, model_type='cnn_lstm',
-            input_size=input_size, num_classes=5, bidirectional=True
-        )
-        model.eval()
-
-        mp_holistic = mp.solutions.holistic
-        holistic = mp_holistic.Holistic(
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-
-        LABELS = ["good", "bad-knee-angle", "bad-lower-knee", "idle"]
-        BUFFER_SIZE = 10      # החלון המחליק - חזרה אחת
-        VOTE_WINDOW = 7       # לכמה תחזיות אחרונות מסתכלים
-        frame_buffer = collections.deque(maxlen=BUFFER_SIZE)
-        pred_window = collections.deque(maxlen=VOTE_WINDOW)
-        last_predicted_label = None
-        last_rep_frame = -BUFFER_SIZE
-        rep_counts = {label: 0 for label in LABELS}
-        frame_count = 0
-
-        await websocket.send_json({
-            "type": "status",
-            "message": f"Ready to analyze {exercise_name} exercise (base64)",
-            "model_loaded": True
-        })
-
-        while True:
-            try:
-                data = await websocket.receive_text()
-                if data.startswith('data:image/'):
-                    data = data.split(',')[1]
-                binary_data = base64.b64decode(data)
-                nparr = np.frombuffer(binary_data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-                if frame is None:
-                    continue
-
-                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                image.flags.writeable = False
-                results = holistic.process(image)
-
-                if not results.pose_landmarks:
-                    continue
-
-                angles = extract_angles(results.pose_landmarks)
-                features = [angles[i] for i in focus_indices] if focus_indices else angles
-                if use_keypoints:
-                    keypoints = extract_keypoints_xyz(results.pose_landmarks)
-                    features += keypoints
-                frame_buffer.append(features)
-                frame_count += 1
-
-                if len(frame_buffer) == BUFFER_SIZE:
-                    sequence = np.array(frame_buffer)
-                    if use_velocity and len(sequence) > 2:
-                        sequence = add_velocity_features(sequence)
-                    sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
-                    lengths = torch.tensor([BUFFER_SIZE])
-                    with torch.no_grad():
-                        output = model(sequence_tensor, lengths)
-                        predicted = torch.argmax(output, dim=1).item()
-                        confidence = torch.softmax(output, dim=1)[0][predicted].item()
-                    predicted_label = LABELS[predicted]
-
-                    # majority voting אם רוצים, אחרת תוכל להוריד
-                    pred_window.append(predicted_label)
-                    voted_label = collections.Counter(pred_window).most_common(1)[0][0]
-
-                    # תספור חזרה רק אם יש מעבר/לא idle, אבל תשלח prediction תמיד!
-                    count_this = (voted_label != last_predicted_label and voted_label != "idle" and frame_count - last_rep_frame > BUFFER_SIZE // 2)
-                    if count_this:
-                        rep_counts[voted_label] += 1
-                        last_predicted_label = voted_label
-                        last_rep_frame = frame_count
-
-                    # שולח תמיד את הניבוי (גם אם לא השתנה)
-                    await websocket.send_json({
-                        "type": "prediction",
-                        "frame_count": frame_count,
-                        "prediction": voted_label,
-                        "confidence": float(confidence),
-                        "rep_counts": rep_counts,
-                        "count_this": count_this
-                    })
-                    # הזזה של החלון – הזזת הפריים הראשון בלבד!
-                    frame_buffer.popleft()
 
                 await websocket.send_json({
                     "type": "frame_processed",

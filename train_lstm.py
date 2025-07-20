@@ -100,11 +100,11 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     base_features = len(focus_indices) if focus_indices is not None else 40
     if use_keypoints:
         base_features += 12 * 3  # 12 keypoints * (x,y,z)
-    if use_velocity:
-        base_features *= 3  # Triple the input size for velocity + acceleration features
     input_size = base_features
+    if use_velocity:
+        input_size *= 3  # Triple the input size for velocity + acceleration features
     if use_statistics:
-        input_size += base_features * 6  # Add 6 statistical features per feature (mean, median, std, max, min, range)
+        input_size += input_size * 6  # Add 6 statistical features per feature (mean, median, std, max, min, range)
     if use_ratios:
         # Add 1 ratio feature: primary knee angle / primary torso angle
         input_size += 1

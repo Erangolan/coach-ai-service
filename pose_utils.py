@@ -8,13 +8,49 @@ from torch.nn.utils.rnn import pack_padded_sequence
 mp_holistic = mp.solutions.holistic
 
 ANGLE_PARTS_MAP = {
-    "right_leg": [2, 8, 10, 12, 14],
-    "left_leg": [3, 9, 11, 13, 15],
-    "right_knee": [2, 8, 10, 12, 14],
-    "left_knee": [3, 9, 11, 13, 15],
-    "right_arm": [0, 4, 20, 22],
-    "left_arm": [1, 5, 21, 23],
+    # Specific joint angles
+    "right_arm": [0, 4, 20, 21],  # Right arm angles (shoulder-elbow-wrist, elbow-shoulder-hip, elbow alignments)
+    "left_arm": [1, 5, 20, 21],   # Left arm angles (shoulder-elbow-wrist, elbow-shoulder-hip, elbow alignments)
+    "right_leg": [2, 8, 12, 14],  # Right leg angles (hip-knee-ankle, ankle-knee-hip, hip-knee-ankle, shoulder-hip-ankle)
+    "left_leg": [3, 9, 13, 15],   # Left leg angles (hip-knee-ankle, ankle-knee-hip, hip-knee-ankle, shoulder-hip-ankle)
+    
+    # Specific joint focus
+    "right_knee": [2, 6, 10, 12, 22, 24, 30],  # Right knee related angles
+    "left_knee": [3, 7, 11, 13, 23, 25, 31],   # Left knee related angles
+    "right_hip": [2, 6, 8, 10, 12, 14, 16, 18, 22, 24, 26, 28, 30],  # Right hip related angles
+    "left_hip": [3, 7, 9, 11, 13, 15, 17, 19, 23, 25, 27, 29, 31],   # Left hip related angles
+    "right_ankle": [2, 8, 12, 14, 18, 24, 28],  # Right ankle related angles
+    "left_ankle": [3, 9, 13, 15, 19, 25, 29],   # Left ankle related angles
+    "right_shoulder": [0, 4, 10, 14, 16, 18, 20, 26, 28],  # Right shoulder related angles
+    "left_shoulder": [1, 5, 11, 15, 17, 19, 21, 27, 29],   # Left shoulder related angles
+    "right_elbow": [0, 4, 20],  # Right elbow related angles
+    "left_elbow": [1, 5, 21],   # Left elbow related angles
+    "right_wrist": [0],  # Right wrist related angles
+    "left_wrist": [1],   # Left wrist related angles
+    
+    # Body sections
+    "shoulders": [4, 5, 10, 11, 16, 17, 26, 27, 28, 29],  # Shoulder-related angles
+    "elbows": [0, 1, 4, 5, 20, 21],     # Elbow-related angles
+    "wrists": [0, 1],     # Wrist-related angles (arm angles)
+    "hips": [2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26, 27, 30, 31],  # Hip-related angles
+    "knees": [2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 22, 23, 24, 25, 30, 31],  # Knee-related angles
+    "ankles": [2, 3, 8, 9, 12, 13, 14, 15, 18, 19, 24, 25, 28, 29],  # Ankle-related angles
+    "feet": [2, 3, 8, 9, 12, 13, 14, 15, 18, 19, 24, 25, 28, 29],  # Same as ankles for now
+    "hands": [0, 1, 4, 5, 20, 21],  # Hand-related angles (same as elbows)
+    
+    # Body sections
+    "upper_body": [0, 1, 4, 5, 10, 11, 16, 17, 20, 21, 26, 27, 28, 29],  # Arms, shoulders, torso upper
+    "lower_body": [2, 3, 6, 7, 8, 9, 12, 13, 14, 15, 18, 19, 22, 23, 24, 25, 30, 31],  # Legs, hips, torso lower
+    "right_side": [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30],  # Right side angles
+    "left_side": [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31],   # Left side angles
+    
+    # Torso (alignment and cross-body angles)
     "torso": [6, 7, 16, 17, 18, 19, 24, 25, 26, 27],
+    
+    # Face parts (for future use) - these don't have angles yet
+    "face": [],  # No face angles in current implementation
+    
+    # All angles
     "full_body": list(range(40)),
 }
 
@@ -29,6 +65,57 @@ def get_angle_indices_by_parts(focus_parts):
         else:
             raise ValueError(f"Unknown focus part: {part}. Available: {list(ANGLE_PARTS_MAP.keys())}")
     return sorted(indices)
+
+def print_available_parts():
+    """Print all available body parts and their angle indices"""
+    print("=== Available Body Parts ===")
+    for part, indices in ANGLE_PARTS_MAP.items():
+        print(f"{part}: {indices}")
+    
+    print("\n=== Usage Examples ===")
+    print("For shoulders only: focus_parts=['shoulders']")
+    print("For upper body: focus_parts=['upper_body']")
+    print("For right side: focus_parts=['right_side']")
+    print("For multiple parts: focus_parts=['shoulders', 'elbows', 'wrists']")
+    print("For legs: focus_parts=['hips', 'knees', 'ankles']")
+
+def get_angle_description(angle_index):
+    """Get a description of what each angle represents"""
+    angle_descriptions = {
+        0: "Right arm angle (shoulder-elbow-wrist)",
+        1: "Left arm angle (shoulder-elbow-wrist)",
+        2: "Right leg angle (hip-knee-ankle)",
+        3: "Left leg angle (hip-knee-ankle)",
+        4: "Right shoulder angle (elbow-shoulder-hip)",
+        5: "Left shoulder angle (elbow-shoulder-hip)",
+        6: "Right knee angle (knee-hip-shoulder)",
+        7: "Left knee angle (knee-hip-shoulder)",
+        8: "Right ankle angle (ankle-knee-hip)",
+        9: "Left ankle angle (ankle-knee-hip)",
+        10: "Right shoulder-hip-knee angle",
+        11: "Left shoulder-hip-knee angle",
+        12: "Right hip-knee-ankle angle",
+        13: "Left hip-knee-ankle angle",
+        14: "Right shoulder-hip-ankle angle",
+        15: "Left shoulder-hip-ankle angle",
+        16: "Shoulder alignment (right-left-hip)",
+        17: "Shoulder alignment (left-right-hip)",
+        18: "Cross body angles (right shoulder-left hip-left ankle)",
+        19: "Cross body angles (left shoulder-right hip-right ankle)",
+        20: "Elbow alignment (right-left shoulder)",
+        21: "Elbow alignment (left-right shoulder)",
+        22: "Knee alignment (right-left hip)",
+        23: "Knee alignment (left-right hip)",
+        24: "Ankle alignment (right-left knee)",
+        25: "Ankle alignment (left-right knee)",
+        26: "Shoulder-hip alignment (right-left)",
+        27: "Shoulder-hip alignment (left-right)",
+        28: "Shoulder-ankle alignment (right-left)",
+        29: "Shoulder-ankle alignment (left-right)",
+        30: "Hip-knee alignment (right-left)",
+        31: "Hip-knee alignment (left-right)",
+    }
+    return angle_descriptions.get(angle_index, f"Angle {angle_index} (no description available)")
 
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size=40, hidden_size=256, num_layers=3, num_classes=2, dropout=0.5, bidirectional=True):
