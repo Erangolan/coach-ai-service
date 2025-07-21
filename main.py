@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from typing import List
+import time
 from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features
 
 DATABASE_URL = "postgresql://erangolan:eran1234@localhost:5432/exercise_db"
@@ -452,27 +453,143 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         ANALYSIS_INTERVAL = 0.2  # seconds
         VOTING_WINDOW_SIZE = 5  # Number of recent predictions to consider
         MIN_CONFIDENCE_THRESHOLD = 0.7  # Minimum confidence for counting
-        MIN_TIME_BETWEEN_REPS = 0.5  # seconds between rep counting
+        MIN_TIME_BETWEEN_REPS = 0.2  # seconds between rep counting
         MIN_AGREEMENT = 3  # At least 3 out of 5 predictions must agree
+
+        # State machine for rep counting
+        class RepStateMachine:
+            def __init__(self):
+                self.state = "idle"  # idle, good, bad
+                self.rep_count = 0
+                self.last_state_change_time = 0.0
+                self.min_state_duration = 0.1  # Minimum time to stay in a state (seconds)
+                self.min_rep_duration = 0.2  # Minimum rep duration (seconds)
+                self.max_rep_duration = 2.0  # Maximum rep duration (seconds)
+                self.rep_start_time = None
+                self.rep_end_time = None
+                self.rep_durations = []  # Track rep durations for validation
+            
+            def update(self, prediction, confidence, current_time):
+                """Update state machine and return if a rep was completed"""
+                rep_completed = False
+                old_state = self.state
+                
+                # Only consider high confidence predictions
+                if confidence < MIN_CONFIDENCE_THRESHOLD:
+                    print(f"[STATE] {current_time:.2f}s: {old_state} → {old_state} (low_confidence: {confidence:.2f})")
+                    return False, "low_confidence"
+                
+                # Check if enough time has passed since last state change
+                if current_time - self.last_state_change_time < self.min_state_duration:
+                    time_in_state = current_time - self.last_state_change_time
+                    print(f"[STATE] {current_time:.2f}s: {old_state} → {old_state} (state_too_short: {time_in_state:.2f}s < {self.min_state_duration}s)")
+                    return False, "state_too_short"
+                
+                # State transitions
+                if self.state == "idle":
+                    if prediction == "good":
+                        self.state = "good"
+                        self.last_state_change_time = current_time
+                        self.rep_start_time = current_time
+                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (rep_started) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        return False, "rep_started"
+                    elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
+                        self.state = "bad"
+                        self.last_state_change_time = current_time
+                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (bad_form) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        return False, "bad_form"
+                
+                elif self.state == "good":
+                    if prediction == "idle":
+                        self.state = "idle"
+                        self.last_state_change_time = current_time
+                        self.rep_end_time = current_time
+                        # Check if rep duration is reasonable
+                        if self.rep_start_time:
+                            rep_duration = self.rep_end_time - self.rep_start_time
+                            if self.min_rep_duration <= rep_duration <= self.max_rep_duration:
+                                self.rep_count += 1
+                                self.rep_durations.append(rep_duration)
+                                rep_completed = True
+                                print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (rep_completed) - Duration: {rep_duration:.2f}s - Total reps: {self.rep_count}")
+                                return rep_completed, f"rep_completed_duration_{rep_duration:.1f}s"
+                            else:
+                                reason = f"rep_too_short_{rep_duration:.1f}s" if rep_duration < self.min_rep_duration else f"rep_too_long_{rep_duration:.1f}s"
+                                print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} ({reason}) - Duration: {rep_duration:.2f}s")
+                                return False, reason
+                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (no_rep_start_time)")
+                        return False, "no_rep_start_time"
+                    elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
+                        self.state = "bad"
+                        self.last_state_change_time = current_time
+                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (bad_form_during_rep) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        return False, "bad_form_during_rep"
+                
+                elif self.state == "bad":
+                    if prediction == "idle":
+                        self.state = "idle"
+                        self.last_state_change_time = current_time
+                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (returned_to_idle) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        return False, "returned_to_idle"
+                    elif prediction == "good":
+                        self.state = "good"
+                        self.last_state_change_time = current_time
+                        self.rep_start_time = current_time
+                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (rep_started_after_bad) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        return False, "rep_started_after_bad"
+                
+                print(f"[STATE] {current_time:.2f}s: {old_state} → {old_state} (no_change) - Prediction: {prediction} (conf: {confidence:.2f})")
+                return False, "no_change"
+            
+            def get_status_message(self, current_time):
+                """Get a human-readable status message"""
+                if self.state == "idle":
+                    return "Ready for next rep"
+                elif self.state == "good":
+                    if self.rep_start_time:
+                        duration = current_time - self.rep_start_time
+                        return f"Good form! ({duration:.1f}s)"
+                    return "Good form!"
+                elif self.state == "bad":
+                    return "Check your form"
+                return "Unknown state"
 
         frame_buffer = deque(maxlen=BUFFER_SIZE)
         prediction_history = deque(maxlen=VOTING_WINDOW_SIZE)
         rep_counts = {label: 0 for label in LABELS}
         frame_count = 0
         last_analysis_time = 0.0
-        last_rep_time = 0.0
         current_time = 0.0
+        
+        # Initialize state machine
+        state_machine = RepStateMachine()
+        
+        # Print initial parameters
+        print(f"[INIT] State Machine Parameters:")
+        print(f"[INIT]   min_state_duration: {state_machine.min_state_duration}s")
+        print(f"[INIT]   min_rep_duration: {state_machine.min_rep_duration}s")
+        print(f"[INIT]   max_rep_duration: {state_machine.max_rep_duration}s")
+        print(f"[INIT]   min_confidence_threshold: {MIN_CONFIDENCE_THRESHOLD}")
+        print(f"[INIT]   analysis_interval: {ANALYSIS_INTERVAL}s")
+        print(f"[INIT]   voting_window_size: {VOTING_WINDOW_SIZE}")
+        print(f"[INIT]   min_agreement: {MIN_AGREEMENT}")
 
         await websocket.send_json({
             "type": "status",
-            "message": f"Ready to analyze {exercise_name} exercise (base64)",
+            "message": f"Ready to analyze {exercise_name} exercise (base64) with state machine rep counting",
             "model_loaded": True,
             "analysis_params": {
                 "analysis_interval": ANALYSIS_INTERVAL,
                 "voting_window_size": VOTING_WINDOW_SIZE,
                 "min_confidence_threshold": MIN_CONFIDENCE_THRESHOLD,
                 "min_time_between_reps": MIN_TIME_BETWEEN_REPS,
-                "min_agreement": MIN_AGREEMENT
+                "min_agreement": MIN_AGREEMENT,
+                "state_machine": {
+                    "min_state_duration": state_machine.min_state_duration,
+                    "min_rep_duration": state_machine.min_rep_duration,
+                    "max_rep_duration": state_machine.max_rep_duration,
+                    "states": ["idle", "good", "bad"]
+                }
             }
         })
 
@@ -526,6 +643,9 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                         predicted = torch.argmax(output, dim=1).item()
                         confidence = torch.softmax(output, dim=1)[0][predicted].item()
                     predicted_label = LABELS[predicted]
+                    
+                    # Print prediction details
+                    print(f"[PRED] {current_time:.2f}s: {predicted_label} (conf: {confidence:.3f}) - Frame: {frame_count}")
 
                     # Add prediction to history
                     prediction_history.append({
@@ -535,9 +655,10 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                     })
 
                     # Check for agreement in recent predictions
-                    count_this = False
                     final_prediction = "idle"
                     final_confidence = 0.0
+                    rep_completed = False
+                    state_message = "no_agreement"
 
                     if len(prediction_history) >= MIN_AGREEMENT:
                         # Count occurrences of each label in recent predictions
@@ -562,12 +683,15 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                                 final_prediction = best_label['label']
                                 final_confidence = best_label['confidence']
                                 
-                                # Count repetition if it's not idle and enough time has passed
-                                if (final_prediction != "idle" and 
-                                    current_time - last_rep_time >= MIN_TIME_BETWEEN_REPS):
-                                    rep_counts[final_prediction] += 1
-                                    count_this = True
-                                    last_rep_time = current_time
+                                # Update state machine
+                                rep_completed, state_message = state_machine.update(final_prediction, final_confidence, current_time)
+                                
+                                # Update rep counts based on state machine
+                                if rep_completed:
+                                    rep_counts["good"] = state_machine.rep_count
+                                
+                                # Print final decision
+                                print(f"[DECISION] {current_time:.2f}s: Final={final_prediction} (conf: {final_confidence:.3f}) - Rep completed: {rep_completed} - Message: {state_message}")
 
                     last_analysis_time = current_time
 
@@ -585,7 +709,16 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                         "prediction": final_prediction,
                         "confidence": float(final_confidence),
                         "rep_counts": rep_counts,
-                        "count_this": count_this,
+                        "count_this": rep_completed,
+                        "state_machine": {
+                            "current_state": state_machine.state,
+                            "rep_count": state_machine.rep_count,
+                            "state_message": state_message,
+                            "status_message": state_machine.get_status_message(current_time),
+                            "time_in_state": current_time - state_machine.last_state_change_time,
+                            "avg_rep_duration": sum(state_machine.rep_durations) / len(state_machine.rep_durations) if state_machine.rep_durations else 0,
+                            "rep_durations": state_machine.rep_durations[-5:] if state_machine.rep_durations else []  # Last 5 reps
+                        },
                         "prediction_history_size": len(prediction_history),
                         "high_confidence_count": len([p for p in prediction_history if p['confidence'] >= MIN_CONFIDENCE_THRESHOLD])
                     })
