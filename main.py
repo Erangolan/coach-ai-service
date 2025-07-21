@@ -25,7 +25,40 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from typing import List
 import time
+import logging
+from datetime import datetime
 from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features
+
+# Setup logging
+def setup_prediction_logger(exercise_name):
+    """Setup logger for prediction tracking"""
+    # Create logs directory if it doesn't exist
+    os.makedirs('logs', exist_ok=True)
+    
+    # Create logger
+    logger = logging.getLogger(f'prediction_{exercise_name}')
+    logger.setLevel(logging.INFO)
+    
+    # Create file handler
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f'logs/predictions_{exercise_name}_{timestamp}.log'
+    file_handler = logging.FileHandler(log_filename)
+    file_handler.setLevel(logging.INFO)
+    
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
 
 DATABASE_URL = "postgresql://erangolan:eran1234@localhost:5432/exercise_db"
 engine = create_engine(DATABASE_URL)
@@ -408,6 +441,10 @@ async def predict_exercise(file: UploadFile = File(...), exercise_name: str = Fo
 async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: str):
     await websocket.accept()
     holistic = None
+    
+    # Setup prediction logger
+    prediction_logger = setup_prediction_logger(exercise_name)
+    prediction_logger.info(f"Starting prediction session for exercise: {exercise_name}")
 
     try:
         focus_parts = ['right_knee', 'right_shoulder', 'torso']
@@ -453,13 +490,13 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         ANALYSIS_INTERVAL = 0.2  # seconds
         VOTING_WINDOW_SIZE = 5  # Number of recent predictions to consider
         MIN_CONFIDENCE_THRESHOLD = 0.7  # Minimum confidence for counting
-        MIN_TIME_BETWEEN_REPS = 0.2  # seconds between rep counting
+        MIN_TIME_BETWEEN_REPS = 0.1  # seconds between rep counting
         MIN_AGREEMENT = 3  # At least 3 out of 5 predictions must agree
 
         # State machine for rep counting
         class RepStateMachine:
             def __init__(self):
-                self.state = "idle"  # idle, good, bad
+                self.state = "idle"  # idle, good, bad-left-angle, bad-lower-knee, bad-right-angle
                 self.rep_count = 0
                 self.last_state_change_time = 0.0
                 self.min_state_duration = 0.1  # Minimum time to stay in a state (seconds)
@@ -468,21 +505,54 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                 self.rep_start_time = None
                 self.rep_end_time = None
                 self.rep_durations = []  # Track rep durations for validation
+                self.bad_form_counts = {
+                    "bad-left-angle": 0,
+                    "bad-lower-knee": 0,
+                    "bad-right-angle": 0
+                }
+                # Track if rep started from good form
+                self.rep_started_from_good = False
+                # Timeout mechanism
+                self.state_timeout = 1.0  # Maximum time to stay in any state (seconds)
             
             def update(self, prediction, confidence, current_time):
                 """Update state machine and return if a rep was completed"""
-                rep_completed = False
+                rep_completed = True
                 old_state = self.state
+                
+                # Check for timeout - if we've been in any state too long, return to idle
+                if self.state != "idle" and (current_time - self.last_state_change_time) > self.state_timeout:
+                    time_in_state = current_time - self.last_state_change_time
+                    prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → idle (timeout: {time_in_state:.2f}s > {self.state_timeout}s)")
+                    
+                    # If we were in good state and have a valid rep, count it
+                    if old_state == "good" and self.rep_start_time:
+                        rep_duration = current_time - self.rep_start_time
+                        if self.min_rep_duration <= rep_duration <= self.max_rep_duration:
+                            self.rep_count += 1
+                            self.rep_durations.append(rep_duration)
+                            rep_completed = True
+                            prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → idle (rep_completed_timeout) - Duration: {rep_duration:.2f}s - Total reps: {self.rep_count}")
+                        else:
+                            reason = f"rep_too_short_{rep_duration:.1f}s" if rep_duration < self.min_rep_duration else f"rep_too_long_{rep_duration:.2f}s"
+                            prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → idle ({reason}_timeout) - Duration: {rep_duration:.2f}s")
+                    
+                    # Reset to idle state
+                    self.state = "idle"
+                    self.rep_started_from_good = False
+                    self.rep_start_time = None
+                    self.last_state_change_time = current_time
+                    return rep_completed, "timeout_to_idle"
                 
                 # Only consider high confidence predictions
                 if confidence < MIN_CONFIDENCE_THRESHOLD:
-                    print(f"[STATE] {current_time:.2f}s: {old_state} → {old_state} (low_confidence: {confidence:.2f})")
+                    prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {old_state} (low_confidence: {confidence:.2f})")
                     return False, "low_confidence"
                 
                 # Check if enough time has passed since last state change
                 if current_time - self.last_state_change_time < self.min_state_duration:
                     time_in_state = current_time - self.last_state_change_time
-                    print(f"[STATE] {current_time:.2f}s: {old_state} → {old_state} (state_too_short: {time_in_state:.2f}s < {self.min_state_duration}s)")
+                    prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {old_state} (state_too_short: {time_in_state:.2f}s < {self.min_state_duration}s)")
                     return False, "state_too_short"
                 
                 # State transitions
@@ -491,54 +561,97 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                         self.state = "good"
                         self.last_state_change_time = current_time
                         self.rep_start_time = current_time
-                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (rep_started) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        self.rep_started_from_good = True  # Mark that rep started from good form
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (rep_started) - Prediction: {prediction} (conf: {confidence:.2f}) - rep_started_from_good: {self.rep_started_from_good}")
                         return False, "rep_started"
                     elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
-                        self.state = "bad"
+                        self.state = prediction  # Use the specific bad form state
                         self.last_state_change_time = current_time
-                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (bad_form) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        self.bad_form_counts[prediction] += 1
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (bad_form) - Prediction: {prediction} (conf: {confidence:.2f}) - Count: {self.bad_form_counts[prediction]}")
                         return False, "bad_form"
                 
                 elif self.state == "good":
-                    if prediction == "idle":
-                        self.state = "idle"
-                        self.last_state_change_time = current_time
-                        self.rep_end_time = current_time
-                        # Check if rep duration is reasonable
-                        if self.rep_start_time:
-                            rep_duration = self.rep_end_time - self.rep_start_time
-                            if self.min_rep_duration <= rep_duration <= self.max_rep_duration:
-                                self.rep_count += 1
-                                self.rep_durations.append(rep_duration)
-                                rep_completed = True
-                                print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (rep_completed) - Duration: {rep_duration:.2f}s - Total reps: {self.rep_count}")
-                                return rep_completed, f"rep_completed_duration_{rep_duration:.1f}s"
+                    # Check if we're staying in "good" state
+                    if prediction == "good":
+                        # We're still in good state, no transition needed
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {old_state} (still_good) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        return False, "still_good"
+                    
+                    # Any transition out of "good" counts as a completed rep
+                    if self.rep_start_time:
+                        rep_duration = current_time - self.rep_start_time
+                        if self.min_rep_duration <= rep_duration <= self.max_rep_duration:
+                            self.rep_count += 1
+                            self.rep_durations.append(rep_duration)
+                            rep_completed = True
+                            
+                            # Handle the transition based on prediction
+                            if prediction == "idle":
+                                self.state = "idle"
+                                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (rep_completed_to_idle) - Duration: {rep_duration:.2f}s - Total reps: {self.rep_count}")
+                            elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
+                                self.state = prediction
+                                self.bad_form_counts[prediction] += 1
+                                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (rep_completed_to_bad) - Duration: {rep_duration:.2f}s - Total reps: {self.rep_count} - Bad form: {prediction}")
                             else:
-                                reason = f"rep_too_short_{rep_duration:.1f}s" if rep_duration < self.min_rep_duration else f"rep_too_long_{rep_duration:.1f}s"
-                                print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} ({reason}) - Duration: {rep_duration:.2f}s")
-                                return False, reason
-                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (no_rep_start_time)")
+                                # Any other transition
+                                self.state = prediction
+                                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (rep_completed_to_other) - Duration: {rep_duration:.2f}s - Total reps: {self.rep_count}")
+                            
+                            # Reset rep tracking
+                            self.rep_started_from_good = False
+                            self.rep_start_time = None
+                            self.last_state_change_time = current_time
+                            return rep_completed, f"rep_completed_duration_{rep_duration:.1f}s"
+                        else:
+                            reason = f"rep_too_short_{rep_duration:.1f}s" if rep_duration < self.min_rep_duration else f"rep_too_long_{rep_duration:.2f}s"
+                            
+                            # Handle the transition based on prediction
+                            if prediction == "idle":
+                                self.state = "idle"
+                                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} ({reason}_to_idle) - Duration: {rep_duration:.2f}s")
+                            elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
+                                self.state = prediction
+                                self.bad_form_counts[prediction] += 1
+                                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} ({reason}_to_bad) - Duration: {rep_duration:.2f}s - Bad form: {prediction}")
+                            else:
+                                self.state = prediction
+                                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} ({reason}_to_other) - Duration: {rep_duration:.2f}s")
+                            
+                            # Reset rep tracking
+                            self.rep_started_from_good = False
+                            self.rep_start_time = None
+                            self.last_state_change_time = current_time
+                            return False, reason
+                    else:
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (no_rep_start_time)")
                         return False, "no_rep_start_time"
-                    elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
-                        self.state = "bad"
-                        self.last_state_change_time = current_time
-                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (bad_form_during_rep) - Prediction: {prediction} (conf: {confidence:.2f})")
-                        return False, "bad_form_during_rep"
                 
-                elif self.state == "bad":
+                elif self.state in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"]:
                     if prediction == "idle":
                         self.state = "idle"
                         self.last_state_change_time = current_time
-                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (returned_to_idle) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (returned_to_idle) - Prediction: {prediction} (conf: {confidence:.2f})")
                         return False, "returned_to_idle"
                     elif prediction == "good":
                         self.state = "good"
                         self.last_state_change_time = current_time
-                        self.rep_start_time = current_time
-                        print(f"[STATE] {current_time:.2f}s: {old_state} → {self.state} (rep_started_after_bad) - Prediction: {prediction} (conf: {confidence:.2f})")
+                        # Start new rep if not already started from good
+                        if not self.rep_started_from_good:
+                            self.rep_start_time = current_time
+                            self.rep_started_from_good = True
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (rep_started_after_bad) - Prediction: {prediction} (conf: {confidence:.2f})")
                         return False, "rep_started_after_bad"
+                    elif prediction in ["bad-left-angle", "bad-lower-knee", "bad-right-angle"] and prediction != old_state:
+                        # Transition between different bad form states
+                        self.state = prediction
+                        self.last_state_change_time = current_time
+                        self.bad_form_counts[prediction] += 1
+                        prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {self.state} (bad_form_changed) - Prediction: {prediction} (conf: {confidence:.2f}) - Count: {self.bad_form_counts[prediction]}")
+                        return False, "bad_form_changed"
                 
-                print(f"[STATE] {current_time:.2f}s: {old_state} → {old_state} (no_change) - Prediction: {prediction} (conf: {confidence:.2f})")
+                prediction_logger.info(f"STATE - Time: {current_time:.2f}s, {old_state} → {old_state} (no_change) - Prediction: {prediction} (conf: {confidence:.2f})")
                 return False, "no_change"
             
             def get_status_message(self, current_time):
@@ -550,8 +663,12 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                         duration = current_time - self.rep_start_time
                         return f"Good form! ({duration:.1f}s)"
                     return "Good form!"
-                elif self.state == "bad":
-                    return "Check your form"
+                elif self.state == "bad-left-angle":
+                    return "Fix left angle"
+                elif self.state == "bad-lower-knee":
+                    return "Lower your knee more"
+                elif self.state == "bad-right-angle":
+                    return "Fix right angle"
                 return "Unknown state"
 
         frame_buffer = deque(maxlen=BUFFER_SIZE)
@@ -564,15 +681,16 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
         # Initialize state machine
         state_machine = RepStateMachine()
         
-        # Print initial parameters
-        print(f"[INIT] State Machine Parameters:")
-        print(f"[INIT]   min_state_duration: {state_machine.min_state_duration}s")
-        print(f"[INIT]   min_rep_duration: {state_machine.min_rep_duration}s")
-        print(f"[INIT]   max_rep_duration: {state_machine.max_rep_duration}s")
-        print(f"[INIT]   min_confidence_threshold: {MIN_CONFIDENCE_THRESHOLD}")
-        print(f"[INIT]   analysis_interval: {ANALYSIS_INTERVAL}s")
-        print(f"[INIT]   voting_window_size: {VOTING_WINDOW_SIZE}")
-        print(f"[INIT]   min_agreement: {MIN_AGREEMENT}")
+        # Log initial parameters
+        prediction_logger.info(f"INIT - State Machine Parameters:")
+        prediction_logger.info(f"INIT -   min_state_duration: {state_machine.min_state_duration}s")
+        prediction_logger.info(f"INIT -   min_rep_duration: {state_machine.min_rep_duration}s")
+        prediction_logger.info(f"INIT -   max_rep_duration: {state_machine.max_rep_duration}s")
+        prediction_logger.info(f"INIT -   state_timeout: {state_machine.state_timeout}s")
+        prediction_logger.info(f"INIT -   min_confidence_threshold: {MIN_CONFIDENCE_THRESHOLD}")
+        prediction_logger.info(f"INIT -   analysis_interval: {ANALYSIS_INTERVAL}s")
+        prediction_logger.info(f"INIT -   voting_window_size: {VOTING_WINDOW_SIZE}")
+        prediction_logger.info(f"INIT -   min_agreement: {MIN_AGREEMENT}")
 
         await websocket.send_json({
             "type": "status",
@@ -588,7 +706,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                     "min_state_duration": state_machine.min_state_duration,
                     "min_rep_duration": state_machine.min_rep_duration,
                     "max_rep_duration": state_machine.max_rep_duration,
-                    "states": ["idle", "good", "bad"]
+                    "state_timeout": state_machine.state_timeout,
+                    "states": ["idle", "good", "bad-left-angle", "bad-lower-knee", "bad-right-angle"]
                 }
             }
         })
@@ -625,6 +744,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                 if (len(frame_buffer) == BUFFER_SIZE and 
                     current_time - last_analysis_time >= ANALYSIS_INTERVAL):
                     
+                    prediction_logger.info(f"ANALYSIS_START - Time: {current_time:.2f}s, Frame: {frame_count}, Buffer size: {len(frame_buffer)}")
+                    
                     sequence = np.array(frame_buffer)
                     # Apply the same preprocessing as in training
                     if use_velocity and len(sequence) > 2:
@@ -644,8 +765,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                         confidence = torch.softmax(output, dim=1)[0][predicted].item()
                     predicted_label = LABELS[predicted]
                     
-                    # Print prediction details
-                    print(f"[PRED] {current_time:.2f}s: {predicted_label} (conf: {confidence:.3f}) - Frame: {frame_count}")
+                    # Log prediction details
+                    prediction_logger.info(f"PREDICTION - Time: {current_time:.2f}s, Label: {predicted_label}, Confidence: {confidence:.3f}, Frame: {frame_count}")
 
                     # Add prediction to history
                     prediction_history.append({
@@ -657,7 +778,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                     # Check for agreement in recent predictions
                     final_prediction = "idle"
                     final_confidence = 0.0
-                    rep_completed = False
+                    rep_completed = True
                     state_message = "no_agreement"
 
                     if len(prediction_history) >= MIN_AGREEMENT:
@@ -690,10 +811,11 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                                 if rep_completed:
                                     rep_counts["good"] = state_machine.rep_count
                                 
-                                # Print final decision
-                                print(f"[DECISION] {current_time:.2f}s: Final={final_prediction} (conf: {final_confidence:.3f}) - Rep completed: {rep_completed} - Message: {state_message}")
+                                # Log final decision
+                                prediction_logger.info(f"DECISION - Time: {current_time:.2f}s, Final: {final_prediction}, Confidence: {final_confidence:.3f}, Rep completed: {rep_completed}, Message: {state_message}")
 
                     last_analysis_time = current_time
+                    prediction_logger.info(f"ANALYSIS_END - Time: {current_time:.2f}s, Final prediction: {final_prediction}, Confidence: {final_confidence:.3f}")
 
                     # Clean old predictions (older than 2 seconds)
                     current_predictions = []
@@ -717,7 +839,8 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                             "status_message": state_machine.get_status_message(current_time),
                             "time_in_state": current_time - state_machine.last_state_change_time,
                             "avg_rep_duration": sum(state_machine.rep_durations) / len(state_machine.rep_durations) if state_machine.rep_durations else 0,
-                            "rep_durations": state_machine.rep_durations[-5:] if state_machine.rep_durations else []  # Last 5 reps
+                            "rep_durations": state_machine.rep_durations[-5:] if state_machine.rep_durations else [],  # Last 5 reps
+                            "bad_form_counts": state_machine.bad_form_counts
                         },
                         "prediction_history_size": len(prediction_history),
                         "high_confidence_count": len([p for p in prediction_history if p['confidence'] >= MIN_CONFIDENCE_THRESHOLD])
@@ -743,7 +866,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
                     break
 
     except Exception as e:
-        print(f"[ERROR] WebSocket error: {e}")
+        prediction_logger.error(f"ERROR - WebSocket error: {e}")
         try:
             await websocket.send_json({
                 "type": "error",
@@ -754,6 +877,7 @@ async def websocket_video_analysis_base64(websocket: WebSocket, exercise_name: s
     finally:
         if holistic is not None:
             holistic.close()
+        prediction_logger.info(f"SESSION_END - Prediction session ended for exercise: {exercise_name}")
         print("[DEBUG] MediaPipe holistic closed.")
 
 def extract_keypoints_xyz(landmarks):
