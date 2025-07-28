@@ -22,7 +22,7 @@ from suppress_logs import suppress_logs
 suppress_logs()
 
 import argparse
-from pose_utils import get_angle_indices_by_parts, LSTMClassifier, CNN_LSTM_Classifier, LSTM_Transformer_Classifier
+from pose_utils import get_angle_indices_by_parts, LSTMClassifier, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, LSTM_GNN_Classifier
 from exercise_dataset import ExerciseDataset
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -220,6 +220,8 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         model = CNN_LSTM_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     elif model_type == 'lstm_transformer':
         model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
+    elif model_type == 'lstm_gnn':
+        model = LSTM_GNN_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     else:
         model = LSTMClassifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     model.to(device)
@@ -295,7 +297,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--augment', action='store_true', help='Apply data augmentation')
     parser.add_argument('--no_bidirectional', action='store_true', help='Disable BiLSTM')
-    parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'cnn_lstm', 'lstm_transformer'], help='Which model to use')
+    parser.add_argument('--model_type', type=str, default='lstm', choices=['lstm', 'cnn_lstm', 'lstm_transformer', 'lstm_gnn'], help='Which model to use')
     args = parser.parse_args()
     
     try:

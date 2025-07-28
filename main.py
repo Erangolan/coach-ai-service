@@ -27,7 +27,7 @@ from typing import List
 import time
 import logging
 from datetime import datetime
-from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features
+from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, LSTM_GNN_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features
 
 # Setup logging
 def setup_prediction_logger(exercise_name):
@@ -99,6 +99,8 @@ def load_model(exercise_name, model_type='cnn_lstm', input_size=40, num_classes=
         model = CNN_LSTM_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     elif model_type == 'lstm_transformer':
         model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
+    elif model_type == 'lstm_gnn':
+        model = LSTM_GNN_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     else:
         model = LSTMClassifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     model.load_state_dict(torch.load(model_path, map_location='cpu'))

@@ -642,3 +642,352 @@ class LSTM_Transformer_Classifier(nn.Module):
         # Final classification
         out = self.fc(pooled_out)
         return out
+
+
+class GraphConvolution(nn.Module):
+    """Simple Graph Convolution Layer"""
+    def __init__(self, in_features, out_features, bias=True):
+        super(GraphConvolution, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
+        if bias:
+            self.bias = nn.Parameter(torch.FloatTensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.weight)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
+    
+    def forward(self, x, adj):
+        # x: (batch_size, num_nodes, in_features)
+        # adj: (batch_size, num_nodes, num_nodes) or (num_nodes, num_nodes)
+        support = torch.matmul(x, self.weight)
+        if len(adj.shape) == 3:
+            output = torch.bmm(adj, support)
+        else:
+            output = torch.matmul(adj, support)
+        if self.bias is not None:
+            output += self.bias
+        return output
+
+
+class LSTM_GNN_Classifier(nn.Module):
+    def __init__(self, spatial_input_size=67, temporal_input_size=200, hidden_size=256, num_layers=3, num_classes=2, 
+                 dropout=0.5, bidirectional=True, gnn_hidden=128, num_gnn_layers=2, 
+                 num_joints=12, use_learned_adj=True):
+        super(LSTM_GNN_Classifier, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.num_joints = num_joints
+        self.use_learned_adj = use_learned_adj
+        self.spatial_input_size = spatial_input_size
+        self.temporal_input_size = temporal_input_size
+        
+        # Batch normalization for spatial and temporal inputs
+        self.spatial_batch_norm = nn.BatchNorm1d(spatial_input_size)
+        self.temporal_batch_norm = nn.BatchNorm1d(temporal_input_size)
+        
+        # GNN layers for spatial modeling (only spatial features)
+        self.gnn_layers = nn.ModuleList()
+        
+        for i in range(num_gnn_layers):
+            if i == 0:
+                in_features = spatial_input_size // num_joints  # Spatial features per joint
+            else:
+                in_features = gnn_hidden
+            self.gnn_layers.append(GraphConvolution(in_features, gnn_hidden))
+        
+        # Learnable adjacency matrix
+        if use_learned_adj:
+            self.adj_matrix = nn.Parameter(torch.randn(num_joints, num_joints))
+            self.adj_activation = nn.Sigmoid()
+        
+        # LSTM layer for temporal modeling (GNN output + temporal features)
+        gnn_output_size = gnn_hidden * num_joints
+        lstm_input_size = gnn_output_size + temporal_input_size
+        self.lstm = nn.LSTM(
+            input_size=lstm_input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+            bidirectional=bidirectional
+        )
+        
+        # Output layers
+        lstm_out = hidden_size * 2 if bidirectional else hidden_size
+        self.fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(lstm_out, lstm_out // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(lstm_out // 2, num_classes)
+        )
+        
+        # Activation functions
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def create_body_graph_adjacency(self, batch_size, device):
+        """Create adjacency matrix for body joints graph"""
+        if self.use_learned_adj:
+            # Use learned adjacency matrix
+            adj = self.adj_activation(self.adj_matrix)
+            # Make it symmetric and add self-loops
+            adj = (adj + adj.t()) / 2
+            adj = adj + torch.eye(self.num_joints, device=device)
+            # Normalize
+            adj = adj / (adj.sum(dim=1, keepdim=True) + 1e-8)
+            return adj.unsqueeze(0).expand(batch_size, -1, -1)
+        else:
+            # Create fixed adjacency matrix based on body structure
+            # This defines connections between joints (shoulder-elbow-wrist, hip-knee-ankle, etc.)
+            adj = torch.zeros(self.num_joints, self.num_joints, device=device)
+            
+            # Define body connections (assuming 12 joints: 6 right + 6 left)
+            connections = [
+                (0, 1), (1, 2),  # Right arm: shoulder-elbow-wrist
+                (3, 4), (4, 5),  # Left arm: shoulder-elbow-wrist
+                (6, 7), (7, 8),  # Right leg: hip-knee-ankle
+                (9, 10), (10, 11),  # Left leg: hip-knee-ankle
+                (0, 3), (1, 4), (2, 5),  # Cross-body connections
+                (6, 9), (7, 10), (8, 11),  # Cross-body connections
+            ]
+            
+            for i, j in connections:
+                adj[i, j] = 1
+                adj[j, i] = 1  # Make symmetric
+            
+            # Add self-loops
+            adj = adj + torch.eye(self.num_joints, device=device)
+            
+            # Normalize
+            adj = adj / (adj.sum(dim=1, keepdim=True) + 1e-8)
+            return adj.unsqueeze(0).expand(batch_size, -1, -1)
+
+    def forward(self, spatial_features, temporal_features, lengths):
+        """
+        Forward pass with separate spatial and temporal features
+        
+        Args:
+            spatial_features: (batch_size, seq_len, spatial_input_size) - for GNN
+            temporal_features: (batch_size, seq_len, temporal_input_size) - for LSTM
+            lengths: sequence lengths
+        """
+        batch_size, seq_len, spatial_feat_size = spatial_features.shape
+        _, _, temporal_feat_size = temporal_features.shape
+        
+        # Process spatial features with GNN
+        # Reshape spatial features for GNN: (batch_size * seq_len, num_joints, features_per_joint)
+        features_per_joint = spatial_feat_size // self.num_joints
+        if spatial_feat_size % self.num_joints != 0:
+            # If not divisible, pad to make it divisible
+            target_size = features_per_joint * self.num_joints
+            if spatial_feat_size < target_size:
+                # Pad with zeros
+                padding = torch.zeros(batch_size, seq_len, target_size - spatial_feat_size, device=spatial_features.device)
+                spatial_features = torch.cat([spatial_features, padding], dim=2)
+            else:
+                # Truncate
+                spatial_features = spatial_features[:, :, :target_size]
+            features_per_joint = target_size // self.num_joints
+        
+        spatial_features = spatial_features.reshape(batch_size * seq_len, self.num_joints, features_per_joint)
+        
+        # Create adjacency matrix
+        adj = self.create_body_graph_adjacency(batch_size * seq_len, spatial_features.device)
+        
+        # Apply GNN layers to spatial features
+        gnn_output = spatial_features
+        for gnn_layer in self.gnn_layers:
+            gnn_output = gnn_layer(gnn_output, adj)
+            gnn_output = self.relu(gnn_output)
+            gnn_output = self.dropout(gnn_output)
+        
+        # Reshape GNN output back to (batch_size, seq_len, gnn_output_size)
+        gnn_output_size = self.gnn_layers[-1].out_features
+        gnn_output = gnn_output.reshape(batch_size, seq_len, self.num_joints * gnn_output_size)
+        
+        # Combine GNN output with temporal features for LSTM
+        combined_features = torch.cat([gnn_output, temporal_features], dim=2)
+        
+        # Process with LSTM
+        packed_x = pack_padded_sequence(combined_features, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, (h_n, _) = self.lstm(packed_x)
+        
+        # Get final hidden state
+        if self.bidirectional:
+            out = torch.cat((h_n[-2], h_n[-1]), dim=1)
+        else:
+            out = h_n[-1]
+        
+        # Final classification
+        out = self.fc(out)
+        return out
+
+def extract_spatial_features(landmarks):
+    """
+    Extract spatial features for GNN: keypoints, angles, and distances
+    """
+    # Extract keypoints (xyz coordinates)
+    keypoints = extract_keypoints_xyz(landmarks)
+    
+    # Extract angles
+    angles = extract_angles(landmarks)
+    
+    # Calculate distances between key joints
+    distances = calculate_joint_distances(landmarks)
+    
+    # Combine spatial features
+    spatial_features = keypoints + angles + distances
+    return spatial_features
+
+def extract_temporal_features(sequence):
+    """
+    Extract temporal features for LSTM: velocity, acceleration, std, angle changes, ratios
+    """
+    if len(sequence) < 2:
+        return []
+    
+    temporal_features = []
+    
+    # Velocity features
+    velocity = np.diff(sequence, axis=0)
+    temporal_features.extend(velocity.flatten())
+    
+    # Acceleration features
+    if len(sequence) >= 3:
+        acceleration = np.diff(velocity, axis=0)
+        temporal_features.extend(acceleration.flatten())
+    else:
+        temporal_features.extend(np.zeros_like(velocity.flatten()))
+    
+    # Standard deviation features
+    std_features = np.std(sequence, axis=0)
+    temporal_features.extend(std_features)
+    
+    # Angle change features (rate of change)
+    angle_changes = calculate_angle_changes(sequence)
+    temporal_features.extend(angle_changes)
+    
+    # Ratio features
+    ratios = calculate_ratios(sequence)
+    temporal_features.extend(ratios)
+    
+    return temporal_features
+
+def calculate_joint_distances(landmarks):
+    """
+    Calculate distances between key body joints
+    """
+    distances = []
+    
+    # Define key joint pairs for distance calculation
+    joint_pairs = [
+        (mp_holistic.PoseLandmark.RIGHT_SHOULDER, mp_holistic.PoseLandmark.RIGHT_ELBOW),
+        (mp_holistic.PoseLandmark.RIGHT_ELBOW, mp_holistic.PoseLandmark.RIGHT_WRIST),
+        (mp_holistic.PoseLandmark.RIGHT_HIP, mp_holistic.PoseLandmark.RIGHT_KNEE),
+        (mp_holistic.PoseLandmark.RIGHT_KNEE, mp_holistic.PoseLandmark.RIGHT_ANKLE),
+        (mp_holistic.PoseLandmark.LEFT_SHOULDER, mp_holistic.PoseLandmark.LEFT_ELBOW),
+        (mp_holistic.PoseLandmark.LEFT_ELBOW, mp_holistic.PoseLandmark.LEFT_WRIST),
+        (mp_holistic.PoseLandmark.LEFT_HIP, mp_holistic.PoseLandmark.LEFT_KNEE),
+        (mp_holistic.PoseLandmark.LEFT_KNEE, mp_holistic.PoseLandmark.LEFT_ANKLE),
+        (mp_holistic.PoseLandmark.RIGHT_SHOULDER, mp_holistic.PoseLandmark.LEFT_SHOULDER),
+        (mp_holistic.PoseLandmark.RIGHT_HIP, mp_holistic.PoseLandmark.LEFT_HIP),
+    ]
+    
+    for joint1_idx, joint2_idx in joint_pairs:
+        pt1 = landmarks.landmark[joint1_idx]
+        pt2 = landmarks.landmark[joint2_idx]
+        
+        # Calculate Euclidean distance
+        distance = np.sqrt((pt1.x - pt2.x)**2 + (pt1.y - pt2.y)**2 + (pt1.z - pt2.z)**2)
+        distances.append(distance)
+    
+    return distances
+
+def calculate_angle_changes(sequence):
+    """
+    Calculate rate of change in angles over time
+    """
+    if len(sequence) < 2:
+        return []
+    
+    # Assume first 15 features are angles (adjust based on your angle count)
+    angle_features = sequence[:, :15] if sequence.shape[1] >= 15 else sequence
+    
+    # Calculate rate of change (first derivative)
+    angle_changes = np.diff(angle_features, axis=0)
+    
+    # Calculate average rate of change per angle
+    avg_changes = np.mean(angle_changes, axis=0)
+    
+    return avg_changes.tolist()
+
+def calculate_ratios(sequence):
+    """
+    Calculate ratios between key angles
+    """
+    if len(sequence) < 1:
+        return []
+    
+    # Assume first 15 features are angles
+    angle_features = sequence[:, :15] if sequence.shape[1] >= 15 else sequence
+    
+    ratios = []
+    
+    # Calculate ratios between key angles
+    if angle_features.shape[1] >= 8:
+        # Knee angle / Torso angle ratio
+        knee_angle = angle_features[:, 2]  # Right knee angle
+        torso_angle = angle_features[:, 8]  # Torso angle
+        knee_torso_ratio = knee_angle / (torso_angle + 1e-5)
+        ratios.append(np.mean(knee_torso_ratio))
+        
+        # Shoulder angle / Hip angle ratio
+        shoulder_angle = angle_features[:, 4]  # Right shoulder angle
+        hip_angle = angle_features[:, 6]  # Right hip angle
+        shoulder_hip_ratio = shoulder_angle / (hip_angle + 1e-5)
+        ratios.append(np.mean(shoulder_hip_ratio))
+    
+    return ratios
+
+def extract_sequence_with_separate_features(video_path, focus_indices=None, use_keypoints=True):
+    """
+    Extract sequence with separate spatial and temporal features
+    """
+    cap = cv2.VideoCapture(video_path)
+    spatial_sequences = []
+    temporal_sequences = []
+    
+    with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image.flags.writeable = False
+            results = holistic.process(image)
+            
+            if results.pose_landmarks:
+                # Extract spatial features for GNN
+                spatial_features = extract_spatial_features(results.pose_landmarks)
+                spatial_sequences.append(spatial_features)
+    
+    cap.release()
+    
+    if len(spatial_sequences) == 0:
+        return None, None
+    
+    spatial_sequences = np.array(spatial_sequences)
+    
+    # Extract temporal features from spatial sequences
+    temporal_features = extract_temporal_features(spatial_sequences)
+    
+    return spatial_sequences, temporal_features
