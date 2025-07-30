@@ -49,18 +49,33 @@ def print_both(message):
     print(message, file=original_stdout, flush=True)
 
 def collate_fn(batch):
-    sequences, labels, filenames = zip(*batch)
-    lengths = [len(seq) for seq in sequences]
-    padded_sequences = nn.utils.rnn.pad_sequence(sequences, batch_first=True)
-    return padded_sequences, torch.tensor(labels), torch.tensor(lengths), filenames
+    if len(batch[0]) == 4:  # LSTM_GNN case: (spatial_seq, temporal_seq, label, filename)
+        spatial_sequences, temporal_sequences, labels, filenames = zip(*batch)
+        lengths = [len(seq) for seq in spatial_sequences]
+        padded_spatial = nn.utils.rnn.pad_sequence(spatial_sequences, batch_first=True)
+        padded_temporal = nn.utils.rnn.pad_sequence(temporal_sequences, batch_first=True)
+        return padded_spatial, padded_temporal, torch.tensor(labels), torch.tensor(lengths), filenames
+    else:  # Regular case: (sequence, label, filename)
+        sequences, labels, filenames = zip(*batch)
+        lengths = [len(seq) for seq in sequences]
+        padded_sequences = nn.utils.rnn.pad_sequence(sequences, batch_first=True)
+        return padded_sequences, torch.tensor(labels), torch.tensor(lengths), filenames
 
-def save_misclassified(dataloader, model, device="cpu"):
+def save_misclassified(dataloader, model, device="cpu", model_type='lstm'):
     model.eval()
     misclassified = []
-    for sequences, labels, lengths, filenames in dataloader:
-        sequences = sequences.to(device)
-        labels = labels.to(device)
-        outputs = model(sequences, lengths)
+    for batch in dataloader:
+        if model_type == 'lstm_gnn':
+            spatial_sequences, temporal_sequences, labels, lengths, filenames = batch
+            spatial_sequences = spatial_sequences.to(device)
+            temporal_sequences = temporal_sequences.to(device)
+            labels = labels.to(device)
+            outputs = model(spatial_sequences, temporal_sequences, lengths)
+        else:
+            sequences, labels, lengths, filenames = batch
+            sequences = sequences.to(device)
+            labels = labels.to(device)
+            outputs = model(sequences, lengths)
         _, predicted = torch.max(outputs.data, 1)
         for i in range(len(labels)):
             if predicted[i].item() != labels[i].item():
@@ -72,23 +87,53 @@ def save_misclassified(dataloader, model, device="cpu"):
     pd.DataFrame(misclassified).to_csv("misclassified.csv", index=False)
     print_both(f"Saved misclassified samples to misclassified.csv")
 
-def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_matrix.png"):
+def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_matrix.png", model_type='lstm'):
     y_true, y_pred = [], []
     model.eval()
-    for sequences, labels, lengths, _ in dataloader:
-        sequences = sequences.to(device)
-        labels = labels.to(device)
-        outputs = model(sequences, lengths)
+    for batch in dataloader:
+        if model_type == 'lstm_gnn':
+            spatial_sequences, temporal_sequences, labels, lengths, _ = batch
+            spatial_sequences = spatial_sequences.to(device)
+            temporal_sequences = temporal_sequences.to(device)
+            labels = labels.to(device)
+            outputs = model(spatial_sequences, temporal_sequences, lengths)
+        else:
+            sequences, labels, lengths, _ = batch
+            sequences = sequences.to(device)
+            labels = labels.to(device)
+            outputs = model(sequences, lengths)
         _, predicted = torch.max(outputs.data, 1)
         y_true += labels.cpu().numpy().tolist()
         y_pred += predicted.cpu().numpy().tolist()
+    
+    if not y_true or not y_pred:
+        print_both("Warning: No predictions to plot in confusion matrix")
+        return
+    
     cm = confusion_matrix(y_true, y_pred)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=LABELS)
-    disp.plot(cmap=plt.cm.Blues)
-    plt.title("Confusion Matrix (Test Set)")
-    plt.savefig(filename)
-    plt.close()
-    print_both(f"Confusion matrix saved to {filename}")
+    
+    # Get unique labels from the data
+    unique_labels = sorted(list(set(y_true + y_pred)))
+    if len(unique_labels) == 0:
+        print_both("Warning: No unique labels found for confusion matrix")
+        return
+    
+    # Create display labels based on actual data
+    display_labels = [LABELS[label] if label < len(LABELS) else f"Class_{label}" for label in unique_labels]
+    
+    try:
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_labels)
+        disp.plot(cmap=plt.cm.Blues)
+        plt.title("Confusion Matrix (Test Set)")
+        plt.savefig(filename)
+        plt.close()
+        print_both(f"Confusion matrix saved to {filename}")
+    except Exception as e:
+        print_both(f"Warning: Could not save confusion matrix: {e}")
+        # Fallback: save raw confusion matrix data
+        import numpy as np
+        np.savetxt(f"{filename}.txt", cm, fmt='%d', header=f"Confusion Matrix (rows: {display_labels}, cols: {display_labels})")
+        print_both(f"Raw confusion matrix saved to {filename}.txt")
 
 def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=8, learning_rate=0.001,
                 use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, augment=False, bidirectional=True, model_type='lstm'):
@@ -113,14 +158,93 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts}, use_keypoints={use_keypoints}, use_velocity={use_velocity}, use_statistics={use_statistics}, use_ratios={use_ratios})")
     print_both(f"focus_indices length: {len(focus_indices) if focus_indices is not None else 40}")
 
-    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, print_both=print_both)
+    # Calculate spatial and temporal features for LSTM_GNN (always calculate, even if not using LSTM_GNN)
+    spatial_features = base_features
+    if use_keypoints:
+        spatial_features += 12 * 3  # 12 keypoints * (x,y,z)
+    
+    temporal_features = 0
+    if use_velocity:
+        temporal_features += spatial_features * 2  # velocity + acceleration
+    if use_statistics:
+        temporal_features += spatial_features * 6  # 6 statistical features per feature
+    if use_ratios:
+        temporal_features += 1  # ratio features
+    
+    # If no temporal features, use some spatial features as temporal
+    if temporal_features == 0:
+        temporal_features = spatial_features // 2
+        spatial_features = spatial_features // 2
+    
+    print_both(f"Feature dimensions: spatial_features={spatial_features}, temporal_features={temporal_features}")
+    
+    # For LSTM_GNN, we need a special dataset that separates spatial and temporal features
+    if model_type == 'lstm_gnn':
+        print_both(f"LSTM_GNN: spatial_features={spatial_features}, temporal_features={temporal_features}")
+        
+        # Create a custom dataset for LSTM_GNN
+        from exercise_dataset import ExerciseDataset
+        full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, print_both=print_both)
+        
+        # Convert the dataset to separate spatial and temporal features
+        class LSTMGNNDataset(torch.utils.data.Dataset):
+            def __init__(self, original_dataset, spatial_features, temporal_features):
+                self.original_dataset = original_dataset
+                self.spatial_features = spatial_features
+                self.temporal_features = temporal_features
+            
+            def __len__(self):
+                return len(self.original_dataset)
+            
+            def __getitem__(self, idx):
+                sequence, label, filename = self.original_dataset[idx]
+                # Split the sequence into spatial and temporal features
+                # This is a simplified split - in practice, you'd need more sophisticated logic
+                seq_len = sequence.shape[0]
+                total_features = sequence.shape[1]
+                
+                # Simple split: first half is spatial, second half is temporal
+                spatial_end = min(self.spatial_features, total_features // 2)
+                temporal_start = spatial_end
+                temporal_end = min(temporal_start + self.temporal_features, total_features)
+                
+                spatial_seq = sequence[:, :spatial_end]
+                temporal_seq = sequence[:, temporal_start:temporal_end]
+                
+                # Pad if necessary
+                if spatial_seq.shape[1] < self.spatial_features:
+                    padding = torch.zeros(seq_len, self.spatial_features - spatial_seq.shape[1])
+                    spatial_seq = torch.cat([spatial_seq, padding], dim=1)
+                if temporal_seq.shape[1] < self.temporal_features:
+                    padding = torch.zeros(seq_len, self.temporal_features - temporal_seq.shape[1])
+                    temporal_seq = torch.cat([temporal_seq, padding], dim=1)
+                
+                return spatial_seq, temporal_seq, label, filename
+        
+        full_dataset = LSTMGNNDataset(full_dataset, spatial_features, temporal_features)
+    else:
+        full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, print_both=print_both)
     
     # Check if we have enough data
     if len(full_dataset) == 0:
         raise ValueError(f"No training data found for exercise '{exercise_name}'. Please check your data directory.")
     
-    # Count samples per class
-    labels = [label for _, label, _ in full_dataset.samples]
+    # Count samples per class and collect video information
+    if hasattr(full_dataset, 'samples'):
+        # Regular dataset
+        labels = [label for _, label, _ in full_dataset.samples]
+        video_to_label = {}  # {filename: label}
+        for _, label, filename in full_dataset.samples:
+            video_to_label[filename] = label
+    else:
+        # LSTMGNNDataset
+        labels = []
+        video_to_label = {}
+        for i in range(len(full_dataset)):
+            _, _, label, filename = full_dataset[i]
+            labels.append(label)
+            video_to_label[filename] = label
+    
     label_counts = Counter(labels)
     print_both(f"Data distribution: {label_counts}")
     
@@ -131,42 +255,37 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     if min_samples < 2:
         print_both(f"Warning: Class with label {min(label_counts, key=label_counts.get)} has only {min_samples} samples.")
         print_both("Consider adding more training data for better results.")
-    
-    # Collect original video names
-    video_to_label = {}  # {filename: label}
-    for _, label, filename in full_dataset.samples:
-        video_to_label[filename] = label
 
     # Debug: Print video distribution
-    print_both(f"Total samples in dataset: {len(full_dataset.samples)}")
+    print_both(f"Total samples in dataset: {len(full_dataset)}")
     print_both(f"Unique videos found: {len(set(video_to_label.keys()))}")
     
     # Count videos per class
     video_class_counts = Counter(video_to_label.values())
     print_both(f"Videos per class: {video_class_counts}")
     
-    # Show some example filenames
-    # print_both("Sample filenames:")
-    # for i, (_, label, filename) in enumerate(full_dataset.samples[:5]):
-    #     print_both(f"  {i}: {filename} -> label {label}")
-    
     # Split by video (not by sample)
     all_videos = list(set(video_to_label.keys()))
-    # print_both(f"All videos: {all_videos}")
     
     # Check if we have enough samples for stratified splitting
     labels_for_videos = [video_to_label[v] for v in all_videos]
     label_counts = Counter(labels_for_videos)
     min_samples_per_class = min(label_counts.values())
     
-    # print_both(f"Labels for videos: {labels_for_videos}")
     print_both(f"Label counts: {label_counts}")
     print_both(f"Min samples per class: {min_samples_per_class}")
     
-    if min_samples_per_class >= 2:
+    # Check if we have enough samples for stratified splitting
+    # We need at least 2 samples per class for stratified splitting
+    if min_samples_per_class >= 2 and len(all_videos) >= len(label_counts) * 2:
         # Use stratified splitting if we have enough samples
-        train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42, stratify=labels_for_videos)
-        train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42, stratify=[video_to_label[v] for v in train_videos])
+        try:
+            train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42, stratify=labels_for_videos)
+            train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42, stratify=[video_to_label[v] for v in train_videos])
+        except ValueError as e:
+            print_both(f"Warning: Stratified splitting failed: {e}. Using regular splitting.")
+            train_videos, test_videos = train_test_split(all_videos, test_size=0.2, random_state=42)
+            train_videos, val_videos = train_test_split(train_videos, test_size=0.25, random_state=42)
     else:
         # Use regular splitting if we don't have enough samples
         print_both(f"Warning: Insufficient samples for stratified splitting. Using regular splitting.")
@@ -178,12 +297,22 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Val videos: {len(val_videos)}")
     print_both(f"Test videos: {len(test_videos)}")
 
-    def split_by_videos(samples, videos):
-        return [i for i, sample in enumerate(samples) if sample[2] in videos]
+    def split_by_videos(dataset, videos):
+        indices = []
+        for i in range(len(dataset)):
+            if hasattr(dataset, 'samples'):
+                # Regular dataset
+                _, _, filename = dataset.samples[i]
+            else:
+                # LSTMGNNDataset
+                _, _, _, filename = dataset[i]
+            if filename in videos:
+                indices.append(i)
+        return indices
 
-    train_idx = split_by_videos(full_dataset.samples, train_videos)
-    val_idx = split_by_videos(full_dataset.samples, val_videos)
-    test_idx = split_by_videos(full_dataset.samples, test_videos)
+    train_idx = split_by_videos(full_dataset, train_videos)
+    val_idx = split_by_videos(full_dataset, val_videos)
+    test_idx = split_by_videos(full_dataset, test_videos)
 
     train_set = Subset(full_dataset, train_idx)
     val_set = Subset(full_dataset, val_idx)
@@ -205,7 +334,6 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         print_both("Training on CPU")
 
     # Count class samples for weights
-    labels = [label for _, label, _ in full_dataset.samples]
     label_counts = Counter(labels)
     num_classes = 5  # עדכן ל-5 קטגוריות (good, bad-left-angle, bad-lower-knee, bad-right-angle, idle)
     class_weights = [0] * num_classes
@@ -221,7 +349,8 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     elif model_type == 'lstm_transformer':
         model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     elif model_type == 'lstm_gnn':
-        model = LSTM_GNN_Classifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
+        # Use the spatial and temporal features calculated earlier
+        model = LSTM_GNN_Classifier(spatial_input_size=spatial_features, temporal_input_size=temporal_features, num_classes=5, bidirectional=bidirectional)
     else:
         model = LSTMClassifier(input_size=input_size, num_classes=5, bidirectional=bidirectional)
     model.to(device)
@@ -236,14 +365,27 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         correct = 0
         total = 0
 
-        for sequences, labels, lengths, _ in train_loader:
-            sequences = sequences.to(device)
-            labels = labels.to(device)
-            optimizer.zero_grad()
-            # Ensure criterion weights are on the same device as labels
-            if criterion.weight.device != labels.device:
-                criterion.weight = criterion.weight.to(labels.device)
-            outputs = model(sequences, lengths)
+        for batch in train_loader:
+            if model_type == 'lstm_gnn':
+                spatial_sequences, temporal_sequences, labels, lengths, _ = batch
+                spatial_sequences = spatial_sequences.to(device)
+                temporal_sequences = temporal_sequences.to(device)
+                labels = labels.to(device)
+                optimizer.zero_grad()
+                # Ensure criterion weights are on the same device as labels
+                if criterion.weight.device != labels.device:
+                    criterion.weight = criterion.weight.to(labels.device)
+                outputs = model(spatial_sequences, temporal_sequences, lengths)
+            else:
+                sequences, labels, lengths, _ = batch
+                sequences = sequences.to(device)
+                labels = labels.to(device)
+                optimizer.zero_grad()
+                # Ensure criterion weights are on the same device as labels
+                if criterion.weight.device != labels.device:
+                    criterion.weight = criterion.weight.to(labels.device)
+                outputs = model(sequences, lengths)
+            
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -260,10 +402,18 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
         model.eval()
         val_correct, val_total = 0, 0
         with torch.no_grad():
-            for sequences, labels, lengths, _ in val_loader:
-                sequences = sequences.to(device)
-                labels = labels.to(device)
-                outputs = model(sequences, lengths)
+            for batch in val_loader:
+                if model_type == 'lstm_gnn':
+                    spatial_sequences, temporal_sequences, labels, lengths, _ = batch
+                    spatial_sequences = spatial_sequences.to(device)
+                    temporal_sequences = temporal_sequences.to(device)
+                    labels = labels.to(device)
+                    outputs = model(spatial_sequences, temporal_sequences, lengths)
+                else:
+                    sequences, labels, lengths, _ = batch
+                    sequences = sequences.to(device)
+                    labels = labels.to(device)
+                    outputs = model(sequences, lengths)
                 _, predicted = torch.max(outputs.data, 1)
                 val_total += labels.size(0)
                 val_correct += (predicted == labels).sum().item()
@@ -279,8 +429,8 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Model saved as {model_path}")
 
     # Save misclassified from test set
-    save_misclassified(test_loader, model, device=device)
-    save_confusion_matrix(model, test_loader, device=device)
+    save_misclassified(test_loader, model, device=device, model_type=model_type)
+    save_confusion_matrix(model, test_loader, device=device, model_type=model_type)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train LSTM/CNN-LSTM/LSTM-Transformer model for exercise classification')
