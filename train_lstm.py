@@ -178,12 +178,14 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     
     print_both(f"Feature dimensions: spatial_features={spatial_features}, temporal_features={temporal_features}")
     
+    # Import ExerciseDataset for all model types
+    from exercise_dataset import ExerciseDataset
+    
     # For LSTM_GNN, we need a special dataset that separates spatial and temporal features
     if model_type == 'lstm_gnn':
         print_both(f"LSTM_GNN: spatial_features={spatial_features}, temporal_features={temporal_features}")
         
         # Create a custom dataset for LSTM_GNN
-        from exercise_dataset import ExerciseDataset
         full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, print_both=print_both)
         
         # Convert the dataset to separate spatial and temporal features
