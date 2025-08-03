@@ -99,12 +99,7 @@ def load_model(exercise_name, model_type='cnn_lstm', input_size=40, num_classes=
         model = CNN_LSTM_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     elif model_type == 'lstm_transformer':
         model = LSTM_Transformer_Classifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
-    elif model_type == 'lstm_gnn':
-        # For LSTM_GNN, we need to estimate spatial and temporal features
-        # This is a simplified estimation - in practice, you'd need to match the training configuration
-        spatial_features = input_size // 2
-        temporal_features = input_size // 2
-        model = LSTM_GNN_Classifier(spatial_input_size=spatial_features, temporal_input_size=temporal_features, num_classes=num_classes, bidirectional=bidirectional)
+
     else:
         model = LSTMClassifier(input_size=input_size, num_classes=num_classes, bidirectional=bidirectional)
     model.load_state_dict(torch.load(model_path, map_location='cpu'))
