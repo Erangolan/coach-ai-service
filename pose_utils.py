@@ -192,6 +192,173 @@ def augment_angles(sequence, noise_std=2.0, probability=0.5):
         sequence = sequence + noise
     return sequence
 
+def gaussian_noise_augmentation(sequence, noise_std_range=(0.5, 3.0), probability=0.7):
+    """
+    Apply Gaussian noise to the sequence with varying noise levels.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        noise_std_range: Range for noise standard deviation (min, max)
+        probability: Probability of applying noise
+    """
+    if np.random.rand() < probability:
+        # Randomly sample noise standard deviation from the range
+        noise_std = np.random.uniform(noise_std_range[0], noise_std_range[1])
+        noise = np.random.normal(0, noise_std, sequence.shape)
+        sequence = sequence + noise
+    return sequence
+
+def scale_augmentation(sequence, scale_range=(0.8, 1.2), probability=0.6):
+    """
+    Apply scale changes to the sequence by multiplying features by a random scale factor.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        scale_range: Range for scale factor (min, max)
+        probability: Probability of applying scaling
+    """
+    if np.random.rand() < probability:
+        # Randomly sample scale factor from the range
+        scale_factor = np.random.uniform(scale_range[0], scale_range[1])
+        sequence = sequence * scale_factor
+    return sequence
+
+def time_warp_augmentation(sequence, warp_factor_range=(0.8, 1.2), probability=0.5):
+    """
+    Apply time warping to the sequence by stretching or compressing the temporal dimension.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        warp_factor_range: Range for warp factor (min, max) - <1 compresses, >1 stretches
+        probability: Probability of applying time warping
+    """
+    if np.random.rand() < probability and len(sequence) > 5:
+        # Randomly sample warp factor from the range
+        warp_factor = np.random.uniform(warp_factor_range[0], warp_factor_range[1])
+        
+        # Calculate new sequence length
+        new_length = int(len(sequence) * warp_factor)
+        new_length = max(3, min(new_length, len(sequence) * 2))  # Keep reasonable bounds
+        
+        if new_length != len(sequence):
+            # Use linear interpolation to warp the sequence
+            old_indices = np.arange(len(sequence))
+            new_indices = np.linspace(0, len(sequence) - 1, new_length)
+            
+            # Interpolate each feature dimension
+            warped_sequence = np.zeros((new_length, sequence.shape[1]))
+            for feature_idx in range(sequence.shape[1]):
+                warped_sequence[:, feature_idx] = np.interp(
+                    new_indices, old_indices, sequence[:, feature_idx]
+                )
+            
+            sequence = warped_sequence
+    
+    return sequence
+
+def targeted_augmentation(sequence, angle_noise_range=(0.5, 2.0), keypoint_noise_range=(0.01, 0.05), 
+                         scale_range=(0.8, 1.2), warp_factor_range=(0.8, 1.2), probability=0.8):
+    """
+    Apply targeted augmentation with different noise levels for angles vs keypoints.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        angle_noise_range: Noise range for angles (degrees)
+        keypoint_noise_range: Noise range for keypoint coordinates (normalized 0-1)
+        scale_range: Range for scale factor (applied to keypoints only)
+        warp_factor_range: Range for time warp factor
+        probability: Probability of applying each augmentation
+    """
+    if np.random.rand() < probability:
+        # Apply targeted Gaussian noise
+        sequence = targeted_gaussian_noise(sequence, angle_noise_range, keypoint_noise_range, probability=0.8)
+        
+        # Apply scale changes only to keypoints
+        sequence = targeted_scale_augmentation(sequence, scale_range, probability=0.7)
+        
+        # Apply time warping to all features
+        sequence = time_warp_augmentation(sequence, warp_factor_range, probability=0.6)
+    
+    return sequence
+
+def targeted_gaussian_noise(sequence, angle_noise_range=(0.5, 2.0), keypoint_noise_range=(0.01, 0.05), probability=0.7):
+    """
+    Apply different noise levels to angles vs keypoints.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        angle_noise_range: Noise range for angles (degrees)
+        keypoint_noise_range: Noise range for keypoint coordinates (normalized 0-1)
+        probability: Probability of applying noise
+    """
+    if np.random.rand() < probability:
+        # Create a copy to avoid modifying original
+        noisy_sequence = sequence.copy()
+        
+        for frame_idx, frame in enumerate(noisy_sequence):
+            # Apply noise to angles (first 40 features)
+            if len(frame) >= 40:
+                angle_noise_std = np.random.uniform(angle_noise_range[0], angle_noise_range[1])
+                angle_noise = np.random.normal(0, angle_noise_std, 40)
+                noisy_sequence[frame_idx, :40] += angle_noise
+            
+            # Apply noise to keypoints (features after 40)
+            if len(frame) > 40:
+                keypoint_noise_std = np.random.uniform(keypoint_noise_range[0], keypoint_noise_range[1])
+                keypoint_noise = np.random.normal(0, keypoint_noise_std, len(frame) - 40)
+                noisy_sequence[frame_idx, 40:] += keypoint_noise
+        
+        return noisy_sequence
+    
+    return sequence
+
+def targeted_scale_augmentation(sequence, scale_range=(0.8, 1.2), probability=0.6):
+    """
+    Apply scale changes only to keypoint coordinates, not angles.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        scale_range: Range for scale factor
+        probability: Probability of applying scaling
+    """
+    if np.random.rand() < probability:
+        # Create a copy to avoid modifying original
+        scaled_sequence = sequence.copy()
+        
+        for frame_idx, frame in enumerate(scaled_sequence):
+            # Apply scaling only to keypoints (features after 40)
+            if len(frame) > 40:
+                scale_factor = np.random.uniform(scale_range[0], scale_range[1])
+                scaled_sequence[frame_idx, 40:] *= scale_factor
+        
+        return scaled_sequence
+    
+    return sequence
+
+def aggressive_augmentation(sequence, noise_std_range=(1.0, 4.0), scale_range=(0.7, 1.3), 
+                          warp_factor_range=(0.7, 1.3), probability=0.8):
+    """
+    Apply all aggressive augmentation techniques together.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        noise_std_range: Range for Gaussian noise standard deviation
+        scale_range: Range for scale factor
+        warp_factor_range: Range for time warp factor
+        probability: Probability of applying each augmentation
+    """
+    if np.random.rand() < probability:
+        # Apply Gaussian noise
+        sequence = gaussian_noise_augmentation(sequence, noise_std_range, probability=0.8)
+        
+        # Apply scale changes
+        sequence = scale_augmentation(sequence, scale_range, probability=0.7)
+        
+        # Apply time warping
+        sequence = time_warp_augmentation(sequence, warp_factor_range, probability=0.6)
+    
+    return sequence
+
 def subtle_bad_augmentation(sequence, noise_std=6, drop_frame_prob=0.10):
     """יצירת דגימת BAD מתנועה טובה ע"י שיבוש זוויות/השמטת פריימים."""
     seq = sequence.copy()
@@ -200,10 +367,69 @@ def subtle_bad_augmentation(sequence, noise_std=6, drop_frame_prob=0.10):
     return np.array(seq)
 
 def speed_up(sequence, factor=2):
-    return sequence[::factor]
+    """
+    Speed up a sequence by taking every nth frame.
+    For float factors, interpolate to get the desired speed.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        factor: Speed factor (float or int). >1 speeds up, <1 slows down
+    """
+    if factor <= 0:
+        return sequence
+    
+    if isinstance(factor, int) or factor.is_integer():
+        # Integer factor - use simple slicing
+        return sequence[::int(factor)]
+    else:
+        # Float factor - use interpolation
+        if factor >= 1:
+            # Speed up: take every nth frame with interpolation
+            step = 1.0 / factor
+            indices = np.arange(0, len(sequence), step)
+            indices = np.clip(indices, 0, len(sequence) - 1).astype(int)
+            return sequence[indices]
+        else:
+            # Slow down: interpolate between frames
+            return slow_down(sequence, 1.0 / factor)
 
 def slow_down(sequence, factor=2):
-    return np.repeat(sequence, factor, axis=0)
+    """
+    Slow down a sequence by repeating frames or interpolating.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        factor: Slow factor (float or int). >1 slows down
+    """
+    if factor <= 0:
+        return sequence
+    
+    if isinstance(factor, int) or factor.is_integer():
+        # Integer factor - use simple repetition
+        return np.repeat(sequence, int(factor), axis=0)
+    else:
+        # Float factor - use interpolation
+        if factor >= 1:
+            # Create more frames by interpolating
+            new_length = int(len(sequence) * factor)
+            if new_length <= len(sequence):
+                return sequence
+            
+            # Use linear interpolation to create more frames
+            old_indices = np.arange(len(sequence))
+            new_indices = np.linspace(0, len(sequence) - 1, new_length)
+            
+            # Interpolate each feature dimension
+            slowed_sequence = np.zeros((new_length, sequence.shape[1]))
+            for feature_idx in range(sequence.shape[1]):
+                slowed_sequence[:, feature_idx] = np.interp(
+                    new_indices, old_indices, sequence[:, feature_idx]
+                )
+            
+            return slowed_sequence
+        else:
+            # Speed up instead
+            return speed_up(sequence, 1.0 / factor)
 
 def random_crop(sequence, min_ratio=0.7, max_ratio=1.0):
     """
@@ -424,33 +650,181 @@ def add_ratio_features(sequence, focus_indices=None):
     enhanced_sequence = np.hstack([sequence, ratio_features])
     return enhanced_sequence
 
+
+def rotate_sequence(sequence, angle_degrees):
+    """
+    Rotate a sequence of (x, y) keypoints by a given angle in degrees.
+    Rotation is applied frame-by-frame, preserving the number of points.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        angle_degrees: Rotation angle in degrees
+    """
+    if len(sequence) == 0:
+        return sequence
+    
+    angle_radians = np.radians(angle_degrees)
+    cos_val, sin_val = np.cos(angle_radians), np.sin(angle_radians)
+    
+    rotated_seq = []
+    for frame in sequence:
+        # Create a copy of the frame
+        rotated_frame = frame.copy()
+        
+        # Only rotate if we have keypoint coordinates (x,y,z triplets)
+        # Keypoints are typically 36 values (12 joints * 3 coordinates) after 40 angles
+        if len(frame) > 40:
+            # Assume first 40 are angles, rest are keypoints
+            angles = frame[:40]
+            keypoints = frame[40:]
+            
+            # Rotate only x,y coordinates (skip z coordinates)
+            rotated_keypoints = []
+            for i in range(0, len(keypoints), 3):  # Process x,y,z triplets
+                if i + 1 < len(keypoints):  # Make sure we have at least x,y
+                    x, y = keypoints[i], keypoints[i+1]
+                    new_x = x * cos_val - y * sin_val
+                    new_y = x * sin_val + y * cos_val
+                    rotated_keypoints.extend([new_x, new_y])
+                    
+                    # Add z coordinate if it exists
+                    if i + 2 < len(keypoints):
+                        rotated_keypoints.append(keypoints[i+2])
+                else:
+                    # Handle case where we have incomplete triplet
+                    rotated_keypoints.extend(keypoints[i:])
+            
+            # Combine angles and rotated keypoints
+            rotated_frame = np.concatenate([angles, rotated_keypoints])
+        
+        rotated_seq.append(rotated_frame)
+    
+    return np.array(rotated_seq)
+
+
 def apply_all_augmentations(sequence, debug_path=None, is_idle=False):
-    aug_sequences = [sequence]  # original
-    aug_sequences.append(augment_angles(sequence, noise_std=2.0, probability=1.0))
+    aug_sequences = [sequence]  # Keep the original sequence as the first element
     
-    # Add time shifting augmentation
-    aug_sequences.append(time_shift(sequence, max_frames=3))
+    # Gaussian noise augmentation with noise_std_range=(1.5, 4.0) and probability=1.0
+    aug_sequences.append(gaussian_noise_augmentation(sequence, noise_std_range=(1.5, 4.0), probability=1.0))
     
-    # Don't apply speed_up/slow_down for idle sequences
+    # Scale augmentation with scale_range=(0.75, 1.25) and probability=1.0
+    aug_sequences.append(scale_augmentation(sequence, scale_range=(0.75, 1.25), probability=1.0))
+    
+    # Rotation augmentation by calling rotate_sequence with a random angle between -5 and 5 degrees
+    aug_sequences.append(rotate_sequence(sequence, angle_degrees=np.random.uniform(-5, 5)))
+    
+    # Temporal stretch/compression using time_warp_augmentation with warp_factor_range=(0.85, 1.15)
+    aug_sequences.append(time_warp_augmentation(sequence, warp_factor_range=(0.85, 1.15), probability=1.0))
+    
+    # Keep time shifting, but increase max_frames to 4
+    aug_sequences.append(time_shift(sequence, max_frames=4))
+    
+    # For non-idle sequences
     if not is_idle:
+        # If sequence length > 3, apply speed_up with a random factor between 1.1 and 1.3
         if len(sequence) > 3:
-            aug_sequences.append(speed_up(sequence, factor=2))
-        aug_sequences.append(slow_down(sequence, factor=2))
+            aug_sequences.append(speed_up(sequence, factor=np.random.uniform(1.1, 1.3)))
+        # Apply slow_down with a random factor between 1.1 and 1.3
+        aug_sequences.append(slow_down(sequence, factor=np.random.uniform(1.1, 1.3)))
     
-    # Add random cropping augmentations
+    # Increase random cropping aggressiveness
     if len(sequence) > 5:
-        # Add 2 different random crops
-        aug_sequences.append(random_crop(sequence, min_ratio=0.7, max_ratio=0.9))
-        aug_sequences.append(random_crop(sequence, min_ratio=0.8, max_ratio=1.0))
+        # Add crop with min_ratio=0.65, max_ratio=0.9
+        aug_sequences.append(random_crop(sequence, min_ratio=0.65, max_ratio=0.9))
+        # Add crop with min_ratio=0.7, max_ratio=0.95
+        aug_sequences.append(random_crop(sequence, min_ratio=0.7, max_ratio=0.95))
     
-    # Add frame dropout augmentations
+    # Increase frame dropout aggressiveness
     if len(sequence) > 5:
-        # Add 2 different frame dropout variations
-        aug_sequences.append(frame_dropout(sequence, dropout_prob=0.1, max_consecutive_drops=2))
-        aug_sequences.append(frame_dropout(sequence, dropout_prob=0.15, max_consecutive_drops=1))
+        # Dropout with dropout_prob=0.15, max_consecutive_drops=3
+        aug_sequences.append(frame_dropout(sequence, dropout_prob=0.15, max_consecutive_drops=3))
+        # Dropout with dropout_prob=0.2, max_consecutive_drops=2
+        aug_sequences.append(frame_dropout(sequence, dropout_prob=0.2, max_consecutive_drops=2))
+    
+    # Add combined aggressive augmentation with:
+    # noise_std_range=(1.5, 4.0)
+    # scale_range=(0.75, 1.25)
+    # warp_factor_range=(0.85, 1.15)
+    # probability=1.0
+    if len(sequence) > 3:
+        aug_sequences.append(aggressive_augmentation(sequence, 
+                                                      noise_std_range=(1.5, 4.0), 
+                                                      scale_range=(0.75, 1.25), 
+                                                      warp_factor_range=(0.85, 1.15), 
+                                                      probability=1.0))
+    
+    # Return only sequences with len(seq) > 0
+    filtered_sequences = [seq for seq in aug_sequences if len(seq) > 0]
+    
+    # If debug_path is provided, print how many augmented samples were generated
+    if debug_path:
+        print(f"{debug_path}: generated {len(filtered_sequences)} augmented samples (orig len: {len(sequence)})")
+    
+    return filtered_sequences
+
+def apply_aggressive_augmentations(sequence, num_augmentations=5, debug_path=None, is_idle=False):
+    """
+    Apply multiple aggressive augmentations to create a larger augmented dataset.
+    This is useful for training scenarios where you need more data.
+    
+    Args:
+        sequence: Input sequence of shape (frames, features)
+        num_augmentations: Number of aggressive augmentations to generate
+        debug_path: Optional debug path for logging
+        is_idle: Whether this is an idle sequence (affects which augmentations are applied)
+    
+    Returns:
+        List of augmented sequences including the original
+    """
+    aug_sequences = [sequence]  # original
+    
+    for i in range(num_augmentations):
+        # Create a copy for this augmentation
+        aug_seq = sequence.copy()
+        
+        # Apply random combinations of aggressive augmentations
+        if np.random.rand() < 0.8:
+            aug_seq = gaussian_noise_augmentation(aug_seq, 
+                                                noise_std_range=(0.3, 4.0), 
+                                                probability=1.0)
+        
+        if np.random.rand() < 0.7:
+            aug_seq = scale_augmentation(aug_seq, 
+                                       scale_range=(0.7, 1.3), 
+                                       probability=1.0)
+        
+        if np.random.rand() < 0.6 and len(aug_seq) > 5:
+            aug_seq = time_warp_augmentation(aug_seq, 
+                                           warp_factor_range=(0.7, 1.3), 
+                                           probability=1.0)
+        
+        if np.random.rand() < 0.5:
+            aug_seq = time_shift(aug_seq, max_frames=5)
+        
+        if np.random.rand() < 0.4 and len(aug_seq) > 5:
+            aug_seq = random_crop(aug_seq, 
+                                min_ratio=0.6, 
+                                max_ratio=0.95)
+        
+        if np.random.rand() < 0.3 and len(aug_seq) > 5:
+            aug_seq = frame_dropout(aug_seq, 
+                                  dropout_prob=0.15, 
+                                  max_consecutive_drops=3)
+        
+        # Don't apply speed changes to idle sequences
+        if not is_idle and np.random.rand() < 0.3:
+            if len(aug_seq) > 3:
+                if np.random.rand() < 0.5:
+                    aug_seq = speed_up(aug_seq, factor=np.random.randint(2, 4))
+                else:
+                    aug_seq = slow_down(aug_seq, factor=np.random.randint(2, 4))
+        
+        aug_sequences.append(aug_seq)
     
     if debug_path:
-        print(f"{debug_path}: generated {len(aug_sequences)} augmented samples (orig len: {len(sequence)})")
+        print(f"{debug_path}: generated {len(aug_sequences)} aggressive augmented samples (orig len: {len(sequence)})")
+    
     return [seq for seq in aug_sequences if len(seq) > 0]
 
 
