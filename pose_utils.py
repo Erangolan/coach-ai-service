@@ -7,6 +7,9 @@ from torch.nn.utils.rnn import pack_padded_sequence
 
 mp_holistic = mp.solutions.holistic
 
+# Default normalization method for the entire pipeline
+DEFAULT_NORMALIZE_METHOD = "minmax"
+
 ANGLE_PARTS_MAP = {
     # Specific joint angles
     "right_arm": [0, 4, 20, 21],  # Right arm angles (shoulder-elbow-wrist, elbow-shoulder-hip, elbow alignments)
@@ -829,6 +832,158 @@ def apply_aggressive_augmentations(sequence, num_augmentations=5, debug_path=Non
 
 
 
+def normalize_per_video(features, method="zscore", normalize_indices=None, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False):
+    """
+    Normalize features per video using z-score or min-max normalization.
+    Only keypoint features are normalized by default.
+    
+    Args:
+        features: numpy array of shape (frames, features) - features for a single video
+        method: normalization method - "zscore" or "minmax"
+        normalize_indices: list of column indices to normalize (if None, auto-determine keypoint indices)
+        focus_indices: list of angle indices to use (for auto-determination)
+        use_keypoints: whether keypoints are included (for auto-determination)
+        use_velocity: whether velocity features are included (for auto-determination)
+        use_statistics: whether statistical features are included (for auto-determination)
+        use_ratios: whether ratio features are included (for auto-determination)
+    
+    Returns:
+        normalized_features: numpy array of same shape as input
+    """
+    if len(features) == 0:
+        return features
+    
+    # If no specific indices provided, auto-determine keypoint indices
+    if normalize_indices is None:
+        normalize_indices = get_normalize_indices(
+            focus_indices=focus_indices,
+            use_keypoints=use_keypoints,
+            use_velocity=use_velocity,
+            use_statistics=use_statistics,
+            use_ratios=use_ratios
+        )
+    
+    # Create a copy to avoid modifying original, ensure float type for normalization
+    normalized_features = features.astype(np.float64).copy()
+    
+    # Apply normalization only to specified indices
+    for col_idx in normalize_indices:
+        if col_idx >= features.shape[1]:
+            continue  # Skip if index is out of bounds
+            
+        column_data = features[:, col_idx]  # Use original data for calculations
+        
+        if method.lower() == "zscore":
+            # Z-score normalization: (x - mean) / std
+            mean_val = np.mean(column_data)
+            std_val = np.std(column_data)
+            # Avoid division by zero
+            if std_val == 0:
+                normalized_features[:, col_idx] = 0
+            else:
+                normalized_features[:, col_idx] = (column_data - mean_val) / std_val
+                
+        elif method.lower() == "minmax":
+            # Min-max normalization: (x - min) / (max - min)
+            min_val = np.min(column_data)
+            max_val = np.max(column_data)
+            range_val = max_val - min_val
+            # Avoid division by zero
+            if range_val == 0 or np.isclose(range_val, 0, atol=1e-10):
+                normalized_features[:, col_idx] = 0
+            else:
+                normalized_values = (column_data - min_val) / range_val
+                normalized_features[:, col_idx] = normalized_values
+                
+        else:
+            raise ValueError(f"Unknown normalization method: {method}. Use 'zscore' or 'minmax'")
+    
+    return normalized_features
+
+def get_normalize_indices(focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False):
+    """
+    Determine which feature indices should be normalized based on feature types.
+    Only keypoint features (XYZ positions) are normalized.
+    
+    Args:
+        focus_indices: list of angle indices to use (if None, use all 40 angles)
+        use_keypoints: whether keypoints are included
+        use_velocity: whether velocity features are included
+        use_statistics: whether statistical features are included
+        use_ratios: whether ratio features are included
+    
+    Returns:
+        normalize_indices: list of column indices that should be normalized (only keypoints)
+    """
+    normalize_indices = []
+    current_idx = 0
+    
+    # Angles (0-180 degrees) - DO NOT normalize
+    num_angles = len(focus_indices) if focus_indices is not None else 40
+    current_idx += num_angles
+    
+    # Keypoints (XYZ positions) - ONLY NORMALIZE THESE
+    if use_keypoints:
+        keypoint_indices = list(range(current_idx, current_idx + 12 * 3))  # 12 keypoints * 3 coordinates
+        normalize_indices.extend(keypoint_indices)
+        current_idx += 12 * 3
+    
+    # Velocity features - DO NOT normalize
+    if use_velocity:
+        base_features_count = current_idx
+        current_idx += base_features_count
+    
+    # Statistical features - DO NOT normalize
+    if use_statistics:
+        base_features_count = len(focus_indices) if focus_indices is not None else 40
+        if use_keypoints:
+            base_features_count += 12 * 3
+        current_idx += base_features_count * 6
+    
+    # Ratio features - DO NOT normalize
+    if use_ratios:
+        current_idx += 1  # Skip ratio features
+    
+    return normalize_indices
+
+def normalize_features_batch(features_list, method="zscore", normalize_indices=None, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False):
+    """
+    Normalize a list of feature sequences, each representing a video.
+    Only keypoint features are normalized by default.
+    
+    Args:
+        features_list: list of numpy arrays, each of shape (frames, features)
+        method: normalization method - "zscore" or "minmax"
+        normalize_indices: list of column indices to normalize (if None, auto-determine keypoint indices)
+        focus_indices: list of angle indices to use (for auto-determination)
+        use_keypoints: whether keypoints are included (for auto-determination)
+        use_velocity: whether velocity features are included (for auto-determination)
+        use_statistics: whether statistical features are included (for auto-determination)
+        use_ratios: whether ratio features are included (for auto-determination)
+    
+    Returns:
+        normalized_features_list: list of normalized numpy arrays
+    """
+    normalized_features_list = []
+    
+    for features in features_list:
+        if len(features) > 0:
+            normalized_features = normalize_per_video(
+                features, 
+                method=method, 
+                normalize_indices=normalize_indices,
+                focus_indices=focus_indices,
+                use_keypoints=use_keypoints,
+                use_velocity=use_velocity,
+                use_statistics=use_statistics,
+                use_ratios=use_ratios
+            )
+            normalized_features_list.append(normalized_features)
+        else:
+            normalized_features_list.append(features)
+    
+    return normalized_features_list
+
 def extract_angles(landmarks):
     angles = []
     points = {
@@ -911,7 +1066,7 @@ def extract_keypoints_xyz(landmarks):
         coords.extend([pt.x, pt.y, pt.z])
     return coords
 
-def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False):
+def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, normalize_method=DEFAULT_NORMALIZE_METHOD):
     cap = cv2.VideoCapture(video_path)
     sequence = []
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
@@ -944,6 +1099,30 @@ def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=Fa
     # Add ratio features if requested
     if use_ratios and len(sequence) > 1:
         sequence = add_ratio_features(sequence, focus_indices)
+    
+    # Apply selective normalization per video (only keypoints)
+    if len(sequence) > 0:
+        normalize_indices = get_normalize_indices(
+            focus_indices=focus_indices,
+            use_keypoints=use_keypoints,
+            use_velocity=use_velocity,
+            use_statistics=use_statistics,
+            use_ratios=use_ratios
+        )
+        if normalize_indices:
+            print(f"Normalizing only keypoint features using {normalize_method}: {normalize_indices}")
+            sequence = normalize_per_video(
+                sequence, 
+                method=normalize_method, 
+                normalize_indices=normalize_indices,
+                focus_indices=focus_indices,
+                use_keypoints=use_keypoints,
+                use_velocity=use_velocity,
+                use_statistics=use_statistics,
+                use_ratios=use_ratios
+            )
+        else:
+            print("No keypoint features found for normalization")
     
     return sequence
 

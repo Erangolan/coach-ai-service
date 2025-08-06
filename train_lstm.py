@@ -22,7 +22,7 @@ from suppress_logs import suppress_logs
 restore_logs = suppress_logs()
 
 import argparse
-from pose_utils import get_angle_indices_by_parts, LSTMClassifier, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, LSTM_GNN_Classifier, LSTM_GNN_Classifier
+from pose_utils import get_angle_indices_by_parts, LSTMClassifier, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, LSTM_GNN_Classifier, LSTM_GNN_Classifier, DEFAULT_NORMALIZE_METHOD
 from exercise_dataset import ExerciseDataset
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -115,7 +115,7 @@ def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_m
         print_both(f"Raw confusion matrix saved to {filename}.txt")
 
 def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=8, learning_rate=0.001,
-                use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, augment=False, bidirectional=True, model_type='lstm'):
+                use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, augment=False, bidirectional=True, model_type='lstm', normalize_method=DEFAULT_NORMALIZE_METHOD):
     print_both(f"Starting training for exercise: {exercise_name}")
     print_both(f"Data directory: {data_dir}")
     print_both(f"Model type: {model_type.upper()}")
@@ -136,11 +136,12 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts}, use_keypoints={use_keypoints}, use_velocity={use_velocity}, use_statistics={use_statistics}, use_ratios={use_ratios})")
     print_both(f"focus_indices length: {len(focus_indices) if focus_indices is not None else 40}")
+    print_both(f"Using per-video normalization method: {normalize_method} (only keypoint features)")
 
     # Import ExerciseDataset for all model types
     from exercise_dataset import ExerciseDataset
     
-    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, print_both=print_both)
+    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, normalize_method=normalize_method, print_both=print_both)
     
     # Check if we have enough data
     if len(full_dataset) == 0:
@@ -327,6 +328,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_velocity', action='store_true', help='Add velocity features (change between consecutive frames)')
     parser.add_argument('--use_statistics', action='store_true', help='Add statistical features (mean, median, std, max, min, range)')
     parser.add_argument('--use_ratios', action='store_true', help='Add ratio features between relevant angles')
+    parser.add_argument('--normalize', type=str, choices=['zscore', 'minmax'], default=DEFAULT_NORMALIZE_METHOD, help=f'Normalization method: zscore or minmax (default: {DEFAULT_NORMALIZE_METHOD})')
 
     parser.add_argument('--augment', action='store_true', help='Apply data augmentation')
     parser.add_argument('--no_bidirectional', action='store_true', help='Disable BiLSTM')
@@ -343,6 +345,7 @@ if __name__ == "__main__":
             augment=args.augment,
             bidirectional=not args.no_bidirectional,
             model_type=args.model_type,
+            normalize_method=args.normalize,
         )
     finally:
         # Close log file

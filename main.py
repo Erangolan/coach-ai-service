@@ -27,7 +27,7 @@ from typing import List
 import time
 import logging
 from datetime import datetime
-from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, LSTM_GNN_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features
+from pose_utils import LSTMClassifier, extract_angles, extract_sequence_from_video, CNN_LSTM_Classifier, LSTM_Transformer_Classifier, LSTM_GNN_Classifier, extract_keypoints_xyz, get_angle_indices_by_parts, add_velocity_features, DEFAULT_NORMALIZE_METHOD
 
 # Setup logging
 def setup_prediction_logger(exercise_name):
