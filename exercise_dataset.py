@@ -19,7 +19,7 @@ LABELS_MAP = {
 LABELS = list(LABELS_MAP.keys())
 
 class ExerciseDataset(Dataset):
-    def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, normalize_method=DEFAULT_NORMALIZE_METHOD, print_both=None):
+    def __init__(self, data_dir, exercise_name, focus_indices=None, transform=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, normalize_method=DEFAULT_NORMALIZE_METHOD, print_both=None, apply_gaussian_smoothing=False, gaussian_window_size=5, gaussian_sigma=1.0):
         self.data_dir = data_dir
         self.exercise_name = exercise_name
         self.transform = transform
@@ -30,6 +30,9 @@ class ExerciseDataset(Dataset):
         self.use_ratios = use_ratios
         self.normalize_method = normalize_method
         self.print_both = print_both
+        self.apply_gaussian_smoothing = apply_gaussian_smoothing
+        self.gaussian_window_size = gaussian_window_size
+        self.gaussian_sigma = gaussian_sigma
 
         self.samples = []
         for label_name in LABELS:
@@ -40,7 +43,7 @@ class ExerciseDataset(Dataset):
             for f in files:
                 video_path = os.path.join(label_dir, f)
                 label = LABELS_MAP[label_name]
-                sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints, use_velocity=self.use_velocity, use_statistics=self.use_statistics, use_ratios=self.use_ratios, normalize_method=self.normalize_method)
+                sequence = extract_sequence_from_video(video_path, focus_indices=self.focus_indices, use_keypoints=self.use_keypoints, use_velocity=self.use_velocity, use_statistics=self.use_statistics, use_ratios=self.use_ratios, normalize_method=self.normalize_method, apply_gaussian_smoothing=self.apply_gaussian_smoothing, gaussian_window_size=self.gaussian_window_size, gaussian_sigma=self.gaussian_sigma)
                 if len(sequence) == 0:
                     if self.print_both:
                         self.print_both(f"EMPTY SEQUENCE: {video_path}")

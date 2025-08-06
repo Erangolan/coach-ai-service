@@ -115,7 +115,7 @@ def save_confusion_matrix(model, dataloader, device="cpu", filename="confusion_m
         print_both(f"Raw confusion matrix saved to {filename}.txt")
 
 def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=8, learning_rate=0.001,
-                use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, augment=False, bidirectional=True, model_type='lstm', normalize_method=DEFAULT_NORMALIZE_METHOD):
+                use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, augment=False, bidirectional=True, model_type='lstm', normalize_method=DEFAULT_NORMALIZE_METHOD, apply_gaussian_smoothing=False, gaussian_window_size=5, gaussian_sigma=1.0):
     print_both(f"Starting training for exercise: {exercise_name}")
     print_both(f"Data directory: {data_dir}")
     print_both(f"Model type: {model_type.upper()}")
@@ -137,11 +137,12 @@ def train_model(data_dir, exercise_name, focus_parts, num_epochs=50, batch_size=
     print_both(f"Using input_size={input_size} (focus_parts={focus_parts}, use_keypoints={use_keypoints}, use_velocity={use_velocity}, use_statistics={use_statistics}, use_ratios={use_ratios})")
     print_both(f"focus_indices length: {len(focus_indices) if focus_indices is not None else 40}")
     print_both(f"Using per-video normalization method: {normalize_method} (only keypoint features)")
+    print_both(f"Gaussian smoothing: {apply_gaussian_smoothing} (window_size={gaussian_window_size}, sigma={gaussian_sigma})")
 
     # Import ExerciseDataset for all model types
     from exercise_dataset import ExerciseDataset
     
-    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, normalize_method=normalize_method, print_both=print_both)
+    full_dataset = ExerciseDataset(data_dir, exercise_name, focus_indices=focus_indices, use_keypoints=use_keypoints, use_velocity=use_velocity, use_statistics=use_statistics, use_ratios=use_ratios, normalize_method=normalize_method, print_both=print_both, apply_gaussian_smoothing=apply_gaussian_smoothing, gaussian_window_size=gaussian_window_size, gaussian_sigma=gaussian_sigma)
     
     # Check if we have enough data
     if len(full_dataset) == 0:
@@ -329,6 +330,9 @@ if __name__ == "__main__":
     parser.add_argument('--use_statistics', action='store_true', help='Add statistical features (mean, median, std, max, min, range)')
     parser.add_argument('--use_ratios', action='store_true', help='Add ratio features between relevant angles')
     parser.add_argument('--normalize', type=str, choices=['zscore', 'minmax'], default=DEFAULT_NORMALIZE_METHOD, help=f'Normalization method: zscore or minmax (default: {DEFAULT_NORMALIZE_METHOD})')
+    parser.add_argument('--apply_gaussian_smoothing', action='store_true', help='Apply Gaussian smoothing to training data (offline preprocessing)')
+    parser.add_argument('--gaussian_window_size', type=int, default=5, help='Window size for Gaussian smoothing (must be odd)')
+    parser.add_argument('--gaussian_sigma', type=float, default=1.0, help='Sigma parameter for Gaussian smoothing')
 
     parser.add_argument('--augment', action='store_true', help='Apply data augmentation')
     parser.add_argument('--no_bidirectional', action='store_true', help='Disable BiLSTM')
@@ -346,6 +350,9 @@ if __name__ == "__main__":
             bidirectional=not args.no_bidirectional,
             model_type=args.model_type,
             normalize_method=args.normalize,
+            apply_gaussian_smoothing=args.apply_gaussian_smoothing,
+            gaussian_window_size=args.gaussian_window_size,
+            gaussian_sigma=args.gaussian_sigma,
         )
     finally:
         # Close log file

@@ -1066,7 +1066,22 @@ def extract_keypoints_xyz(landmarks):
         coords.extend([pt.x, pt.y, pt.z])
     return coords
 
-def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, normalize_method=DEFAULT_NORMALIZE_METHOD):
+def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=False, use_velocity=False, use_statistics=False, use_ratios=False, normalize_method=DEFAULT_NORMALIZE_METHOD, apply_gaussian_smoothing=False, gaussian_window_size=5, gaussian_sigma=1.0):
+    """
+    Extract pose sequence from video with optional Gaussian smoothing for training.
+    
+    Args:
+        video_path: path to the video file
+        focus_indices: list of angle indices to use (if None, use all 40 angles)
+        use_keypoints: whether to include keypoint coordinates
+        use_velocity: whether to add velocity features
+        use_statistics: whether to add statistical features
+        use_ratios: whether to add ratio features
+        normalize_method: normalization method for keypoints
+        apply_gaussian_smoothing: whether to apply Gaussian smoothing (for training)
+        gaussian_window_size: window size for Gaussian smoothing
+        gaussian_sigma: sigma parameter for Gaussian smoothing
+    """
     cap = cv2.VideoCapture(video_path)
     sequence = []
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
@@ -1087,6 +1102,10 @@ def extract_sequence_from_video(video_path, focus_indices=None, use_keypoints=Fa
     cap.release()
     
     sequence = np.array(sequence)
+    
+    # Apply Gaussian smoothing for training (offline preprocessing)
+    if apply_gaussian_smoothing and len(sequence) > 0:
+        sequence = apply_gaussian_smoothing_to_sequence(sequence, gaussian_window_size, gaussian_sigma)
     
     # Add velocity features if requested
     if use_velocity and len(sequence) > 1:
@@ -1359,3 +1378,250 @@ class LSTM_GNN_Classifier(nn.Module):
         # Final classification
         out = self.fc(out)
         return out
+
+# ---- MOTION SMOOTHING ----
+
+def apply_gaussian_smoothing_to_sequence(sequence, window_size=5, sigma=1.0):
+    """
+    Apply Gaussian smoothing to a sequence of pose data (angles/keypoints).
+    This is used for offline preprocessing during training to reduce MediaPipe noise.
+    
+    Args:
+        sequence: numpy array of shape (frames, features) - pose sequence
+        window_size: size of the Gaussian kernel window (must be odd)
+        sigma: standard deviation of the Gaussian kernel
+    
+    Returns:
+        smoothed_sequence: numpy array of same shape as input
+    """
+    if len(sequence) == 0:
+        return sequence
+    
+    # Ensure window_size is odd
+    if window_size % 2 == 0:
+        window_size += 1
+    
+    # Create Gaussian kernel
+    kernel = np.exp(-0.5 * ((np.arange(window_size) - window_size // 2) / sigma) ** 2)
+    kernel = kernel / np.sum(kernel)  # Normalize
+    
+    # Apply smoothing to each feature dimension
+    smoothed_sequence = np.zeros_like(sequence)
+    half_window = window_size // 2
+    
+    for frame_idx in range(len(sequence)):
+        # Calculate the range of frames to use for this frame
+        start_idx = max(0, frame_idx - half_window)
+        end_idx = min(len(sequence), frame_idx + half_window + 1)
+        
+        # Adjust kernel to match the available frames
+        kernel_start = max(0, half_window - frame_idx)
+        kernel_end = kernel_start + (end_idx - start_idx)
+        kernel_slice = kernel[kernel_start:kernel_end]
+        
+        # Normalize the kernel slice
+        kernel_slice = kernel_slice / np.sum(kernel_slice)
+        
+        # Apply weighted average
+        weighted_sum = np.zeros(sequence.shape[1])
+        for i, weight in enumerate(kernel_slice):
+            weighted_sum += weight * sequence[start_idx + i]
+        
+        smoothed_sequence[frame_idx] = weighted_sum
+    
+    return smoothed_sequence
+
+
+class OneEuroFilter:
+    """
+    One Euro Filter for real-time pose smoothing.
+    This is used during live inference to smooth pose data frame-by-frame.
+    
+    Based on the paper: "1€ Filter" by Géry Casiez et al.
+    https://hal.inria.fr/hal-00670496/document
+    
+    The filter adapts its cutoff frequency based on the velocity of the signal,
+    providing smooth tracking for slow movements and responsive tracking for fast movements.
+    """
+    
+    def __init__(self, min_cutoff=1.0, beta=0.007, d_cutoff=1.0, x0=None):
+        """
+        Initialize One Euro Filter.
+        
+        Args:
+            min_cutoff: minimum cutoff frequency (Hz) - controls smoothing for slow movements
+            beta: speed coefficient - controls how much the filter adapts to velocity changes
+            d_cutoff: derivative cutoff frequency (Hz) - controls smoothing of velocity
+            x0: initial value (if None, will be set on first update)
+        """
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x0 = x0
+        
+        # Internal state
+        self.dx0 = None  # Previous velocity
+        self.t0 = None   # Previous timestamp
+        
+        # Low-pass filters
+        self.x_filter = None  # Position filter
+        self.dx_filter = None  # Velocity filter
+    
+    def _alpha(self, cutoff):
+        """Calculate alpha parameter for low-pass filter."""
+        if cutoff <= 0:
+            return 1.0
+        return 1.0 / (1.0 + 1.0 / cutoff)
+    
+    def _low_pass_filter(self, alpha, x, x_prev):
+        """Apply low-pass filter."""
+        if x_prev is None:
+            return x
+        return alpha * x + (1.0 - alpha) * x_prev
+    
+    def update(self, x, t=None):
+        """
+        Update the filter with a new measurement.
+        
+        Args:
+            x: new measurement (can be scalar or array)
+            t: timestamp (if None, uses internal counter)
+        
+        Returns:
+            filtered_x: smoothed measurement
+        """
+        # Initialize if this is the first update
+        if self.x0 is None:
+            self.x0 = x
+            self.t0 = t if t is not None else 0.0
+            return x
+        
+        # Handle timestamps
+        if t is None:
+            if self.t0 is None:
+                t = 0.0
+            else:
+                t = self.t0 + 1.0  # Assume 1 second intervals if no timestamp provided
+        
+        # Calculate time delta
+        dt = t - self.t0
+        if dt <= 0:
+            dt = 1.0  # Avoid division by zero
+        
+        # Calculate velocity (derivative)
+        dx = (x - self.x0) / dt
+        
+        # Initialize velocity filter if needed
+        if self.dx0 is None:
+            self.dx0 = dx
+        
+        # Apply velocity smoothing
+        alpha_d = self._alpha(self.d_cutoff)
+        dx_smooth = self._low_pass_filter(alpha_d, dx, self.dx0)
+        
+        # Calculate adaptive cutoff frequency
+        # Higher velocity = higher cutoff = less smoothing
+        cutoff = self.min_cutoff + self.beta * abs(dx_smooth)
+        
+        # Apply position smoothing with adaptive cutoff
+        alpha_x = self._alpha(cutoff)
+        x_smooth = self._low_pass_filter(alpha_x, x, self.x0)
+        
+        # Update state
+        self.x0 = x_smooth
+        self.dx0 = dx_smooth
+        self.t0 = t
+        
+        return x_smooth
+
+
+class PoseSmoother:
+    """
+    High-level interface for pose smoothing that can handle both angles and keypoints.
+    Manages multiple One Euro Filter instances for different pose features.
+    """
+    
+    def __init__(self, num_features, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
+        """
+        Initialize pose smoother for real-time inference.
+        
+        Args:
+            num_features: number of pose features (angles + keypoints)
+            min_cutoff: minimum cutoff frequency for One Euro Filter
+            beta: speed coefficient for One Euro Filter
+            d_cutoff: derivative cutoff frequency for One Euro Filter
+        """
+        self.filters = []
+        for _ in range(num_features):
+            self.filters.append(OneEuroFilter(min_cutoff, beta, d_cutoff))
+        self.t = 0.0
+    
+    def update(self, pose_data):
+        """
+        Update the smoother with new pose data.
+        
+        Args:
+            pose_data: numpy array of shape (num_features,) - current pose frame
+        
+        Returns:
+            smoothed_pose: numpy array of same shape as input
+        """
+        if len(pose_data) != len(self.filters):
+            raise ValueError(f"Expected {len(self.filters)} features, got {len(pose_data)}")
+        
+        smoothed_pose = np.zeros_like(pose_data)
+        for i, (value, filter_instance) in enumerate(zip(pose_data, self.filters)):
+            smoothed_pose[i] = filter_instance.update(value, self.t)
+        
+        self.t += 1.0  # Increment time counter
+        return smoothed_pose
+    
+    def reset(self):
+        """Reset all filters to their initial state."""
+        for filter_instance in self.filters:
+            filter_instance.x0 = None
+            filter_instance.dx0 = None
+            filter_instance.t0 = None
+        self.t = 0.0
+
+
+def create_pose_smoother_for_features(focus_indices=None, use_keypoints=False, 
+                                    use_velocity=False, use_statistics=False, 
+                                    use_ratios=False, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
+    """
+    Create a PoseSmoother instance configured for the given feature configuration.
+    
+    Args:
+        focus_indices: list of angle indices to use (if None, use all 40 angles)
+        use_keypoints: whether keypoints are included
+        use_velocity: whether velocity features are included
+        use_statistics: whether statistical features are included
+        use_ratios: whether ratio features are included
+        min_cutoff: minimum cutoff frequency for One Euro Filter
+        beta: speed coefficient for One Euro Filter
+        d_cutoff: derivative cutoff frequency for One Euro Filter
+    
+    Returns:
+        PoseSmoother instance configured for the feature set
+    """
+    # Calculate total number of features
+    num_angles = len(focus_indices) if focus_indices is not None else 40
+    num_features = num_angles
+    
+    if use_keypoints:
+        num_features += 12 * 3  # 12 keypoints * 3 coordinates
+    
+    if use_velocity:
+        base_features = num_features
+        num_features += base_features * 2  # velocity + acceleration
+    
+    if use_statistics:
+        base_features = num_angles
+        if use_keypoints:
+            base_features += 12 * 3
+        num_features += base_features * 6  # 6 statistical features per base feature
+    
+    if use_ratios:
+        num_features += 1  # 1 ratio feature
+    
+    return PoseSmoother(num_features, min_cutoff, beta, d_cutoff)
